@@ -1,12 +1,17 @@
 import * as THREE from 'three';
 import RAPIER, { World as RapierWorld } from '@dimforge/rapier3d-compat';
 import { WORLD } from '../config';
-import { RoadNetwork } from './road';
-import { createProps, type PropsSystem } from './props';
-import { createSky, type SkySystem } from './sky';
+import { TrailNetwork } from './trail';
+import { createSky, type SkySystem, applyCarEnvironment } from './sky';
 import { ParticleSystem, type DustSource } from './particles';
+import { OcclusionHash } from './occlusion';
+import { loadEnvTextures, loadEnvMap, type EnvTextures } from './assets';
+import { createWater, type WaterSystem } from './water';
+import { createObstacles, type ObstacleSystem } from './obstacles';
+import { createVegetation, type VegetationSystem } from './vegetation';
+import { tagCollider } from '../physics/materials';
 
-/** Surface ids: 0 tarmac, 1 dirt, 2 gravel, 3 scree, 4 grass, 5 rock */
+/** Surface ids: 0 unused, 1 dirt, 2 gravel, 3 scree, 4 grass, 5 rock, 6 mud, 7 water */
 
 function hash2(x: number, z: number): number {
   const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453;
@@ -38,97 +43,99 @@ function fbm(x: number, z: number, oct = 5): number {
   return a / norm;
 }
 
-function makeCanvasTexture(
-  size: number,
-  paint: (ctx: CanvasRenderingContext2D, s: number) => void,
-): THREE.CanvasTexture {
-  const c = document.createElement('canvas');
-  c.width = c.height = size;
-  const ctx = c.getContext('2d')!;
-  paint(ctx, size);
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
-}
-
-function rockTex() {
-  return makeCanvasTexture(256, (ctx, s) => {
-    ctx.fillStyle = '#6a635c';
-    ctx.fillRect(0, 0, s, s);
-    for (let i = 0; i < 900; i++) {
-      const x = Math.random() * s, y = Math.random() * s;
-      const g = 80 + Math.random() * 70;
-      ctx.fillStyle = `rgb(${g},${g - 8},${g - 16})`;
-      ctx.fillRect(x, y, 2 + Math.random() * 4, 2 + Math.random() * 4);
-    }
-  });
-}
-
-function dirtTex() {
-  return makeCanvasTexture(256, (ctx, s) => {
-    ctx.fillStyle = '#8a6b45';
-    ctx.fillRect(0, 0, s, s);
-    for (let i = 0; i < 1200; i++) {
-      ctx.fillStyle = `rgba(${100 + Math.random() * 60},${70 + Math.random() * 40},${40 + Math.random() * 30},${0.3 + Math.random() * 0.5})`;
-      ctx.fillRect(Math.random() * s, Math.random() * s, 1 + Math.random() * 3, 1 + Math.random() * 3);
-    }
-  });
-}
-
-function grassTex() {
-  return makeCanvasTexture(256, (ctx, s) => {
-    ctx.fillStyle = '#4a6b3a';
-    ctx.fillRect(0, 0, s, s);
-    for (let i = 0; i < 2000; i++) {
-      ctx.strokeStyle = `rgba(${40 + Math.random() * 50},${90 + Math.random() * 80},${30 + Math.random() * 40},0.5)`;
-      const x = Math.random() * s, y = Math.random() * s;
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x + (Math.random() - 0.5) * 4, y - 3 - Math.random() * 5);
-      ctx.stroke();
-    }
-  });
-}
-
-function tarmacTex() {
-  return makeCanvasTexture(256, (ctx, s) => {
-    ctx.fillStyle = '#3a3a3c';
-    ctx.fillRect(0, 0, s, s);
-    for (let i = 0; i < 800; i++) {
-      const g = 45 + Math.random() * 35;
-      ctx.fillStyle = `rgb(${g},${g},${g + 2})`;
-      ctx.fillRect(Math.random() * s, Math.random() * s, 1, 1);
-    }
-    // faint center dashes feel via noise patches
-    ctx.fillStyle = 'rgba(200,180,60,0.15)';
-    for (let y = 0; y < s; y += 32) ctx.fillRect(s * 0.48, y, 4, 14);
-  });
-}
-
 export type TerrainSystem = {
   mesh: THREE.Mesh;
-  water: THREE.Mesh;
+  trail: TrailNetwork;
   heightAt: (x: number, z: number) => number;
   surfaceAt: (x: number, z: number) => number;
-  road: RoadNetwork;
   dispose: () => void;
 };
 
-/**
- * Heightmap WORLD.gridN over WORLD.size: fBm mountains, valley, river,
- * road carving, surface ids, splat shader, trimesh collider, water.
- */
-export function createTerrain(scene: THREE.Scene, physics: RapierWorld): TerrainSystem {
+function splatMaterial(textures: EnvTextures): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    map: textures.dirt,
+    normalMap: textures.dirtN,
+    roughness: 0.92,
+    metalness: 0.03,
+    envMapIntensity: 0.42,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uDirt = { value: textures.dirt };
+    shader.uniforms.uGrass = { value: textures.grass };
+    shader.uniforms.uRock = { value: textures.rock };
+    shader.uniforms.uMud = { value: textures.mud };
+    shader.vertexShader = `
+      attribute float aSurface;
+      varying float vSurf;
+      varying float vSlope;
+      varying vec3 vWPos;
+    ` + shader.vertexShader
+      .replace(
+        '#include <uv_vertex>',
+        `#include <uv_vertex>
+         vSurf = aSurface;`,
+      )
+      .replace(
+        '#include <defaultnormal_vertex>',
+        `#include <defaultnormal_vertex>
+         vSlope = 1.0 - objectNormal.y;`,
+      )
+      .replace(
+        '#include <project_vertex>',
+        `#include <project_vertex>
+         vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`,
+      );
+    shader.fragmentShader = `
+      uniform sampler2D uDirt;
+      uniform sampler2D uGrass;
+      uniform sampler2D uRock;
+      uniform sampler2D uMud;
+      varying float vSurf;
+      varying float vSlope;
+      varying vec3 vWPos;
+    ` + shader.fragmentShader.replace(
+      '#include <map_fragment>',
+      `
+        vec2 uv = vWPos.xz * 0.09;
+        vec3 dirtC = texture2D(uDirt, uv).rgb;
+        vec3 grassTex = texture2D(uGrass, uv * 1.2).rgb;
+        vec3 rockC = texture2D(uRock, uv * 0.65).rgb;
+        vec3 mudC = texture2D(uMud, uv * 1.05).rgb;
+        vec3 grassC = mix(vec3(0.16, 0.30, 0.08), grassTex, 0.22);
+        dirtC = mix(vec3(0.42, 0.34, 0.22), dirtC, 0.55);
+        vec3 gravelC = mix(dirtC * vec3(0.92, 0.88, 0.80), rockC, 0.55);
+        rockC = mix(vec3(0.55, 0.54, 0.50), rockC, 0.7);
+        vec3 mudDark = mudC * vec3(0.52, 0.40, 0.30);
+        float s = floor(vSurf + 0.5);
+        vec3 col = grassC;
+        if (s < 0.5) col = mix(grassC, dirtC, 0.55);
+        else if (s < 1.5) col = mix(grassC, dirtC, 0.72);
+        else if (s < 2.5) col = gravelC;
+        else if (s < 3.5) col = mix(rockC, dirtC, 0.25);
+        else if (s < 4.5) col = mix(grassC, dirtC, clamp(vSlope * 1.2, 0.0, 0.22));
+        else if (s < 5.5) col = mix(rockC, grassC, 0.12);
+        else if (s < 6.5) col = mudDark;
+        else col = mix(mudDark, vec3(0.18, 0.24, 0.22), 0.45);
+        col *= 1.0 - clamp(vSlope, 0.0, 1.0) * 0.18;
+        diffuseColor.rgb *= col;
+      `,
+    );
+  };
+  mat.customProgramCacheKey = () => 'forest-splat-v6';
+  return mat;
+}
+
+export function createTerrain(
+  scene: THREE.Scene,
+  physics: RapierWorld,
+  trail: TrailNetwork,
+  textures: EnvTextures,
+): TerrainSystem {
   const N = WORLD.gridN;
   const size = WORLD.size;
   const half = size * 0.5;
-  const road = new RoadNetwork();
-
   const heights = new Float32Array((N + 1) * (N + 1));
   const surfaces = new Uint8Array((N + 1) * (N + 1));
-
   const cell = size / N;
 
   for (let iz = 0; iz <= N; iz++) {
@@ -137,64 +144,64 @@ export function createTerrain(scene: THREE.Scene, physics: RapierWorld): Terrain
       const z = -half + iz * cell;
       const idx = iz * (N + 1) + ix;
 
-      // Mountain fBm
-      const n = fbm(x * 0.0035, z * 0.0035, 6);
-      let h = n * 220;
+      const n = fbm(x * 0.0038, z * 0.0038, 6);
+      let h = 24 + n * 14;
+      h += fbm(x * 0.011 + 18, z * 0.011, 4) * 7;
+      h += (fbm(x * 0.028, z * 0.028, 2) - 0.5) * 5;
 
-      // Valley trench along valleyLineZ
-      const valleyDist = Math.abs(z - WORLD.valleyLineZ);
-      const valley = Math.exp(-((valleyDist / 95) ** 2));
-      h = h * (1 - 0.85 * valley) + 18 * (1 - valley * 0.5);
+      const infl = trail.influenceAt(x, z);
+      const halfW = infl.width * 0.5;
 
-      // Side ridges
-      const ridge = fbm(x * 0.008 + 20, z * 0.008, 3);
-      h += ridge * 40 * (1 - valley);
-
-      // River bed
-      const riverDist = Math.abs(z - WORLD.riverZ);
-      if (riverDist < WORLD.riverHalfWidth * 2.2) {
-        const rw = 1 - riverDist / (WORLD.riverHalfWidth * 2.2);
-        h -= rw * rw * 14;
+      if (infl.dist < halfW + 28) {
+        const edge = Math.max(0, (infl.dist - halfW) / 28);
+        const carve = 1 - edge * edge;
+        h = h * (1 - carve * 0.62) + infl.heightHint * carve * 0.62;
       }
 
-      // Road carving
-      const infl = road.influenceAt(x, z);
-      const halfW = infl.width * 0.5;
-      if (infl.dist < halfW + 10) {
-        const edge = Math.max(0, (infl.dist - halfW) / 10);
-        const carve = 1 - edge * edge;
-        const target = infl.heightHint;
-        h = h * (1 - carve * 0.92) + target * carve * 0.92;
-        // flatten
-        if (infl.dist < halfW) {
-          h = target * 0.7 + h * 0.3;
+      if (infl.dist < halfW) {
+        if (infl.kind === 'water') {
+          h = infl.heightHint - 0.62 + (fbm(x * 0.14, z * 0.14, 2) - 0.5) * 0.1;
+        } else {
+          let bump = (fbm(x * 0.38, z * 0.38, 3) - 0.5) * 0.32;
+          bump += Math.sin(x * 0.9 + z * 0.15) * 0.06;
+          if (infl.kind === 'rocks' || infl.kind === 'descent') {
+            bump += (fbm(x * 0.62, z * 0.62, 2) - 0.42) * 0.62;
+          }
+          if (infl.kind === 'steep' || infl.kind === 'climb') {
+            bump += (fbm(x * 0.22, z * 0.22, 2) - 0.5) * 0.2;
+          }
+          if (infl.kind === 'mud') {
+            bump *= 0.28;
+            bump += Math.sin(x * 1.6) * Math.sin(z * 0.9) * 0.07;
+          }
+          if (infl.kind === 'logs') bump += (fbm(x * 0.5, z * 0.5, 2) - 0.5) * 0.16;
+          h += bump;
         }
       }
 
-      // Soft floor
       h = Math.max(h, 5);
       heights[idx] = h;
 
-      // Surface assignment
-      let surf = 4; // grass default
-      if (infl.dist < halfW) {
-        surf = infl.surface; // tarmac or gravel branch
-      } else if (infl.dist < halfW + 4) {
-        surf = 1; // dirt shoulder
-      } else if (riverDist < WORLD.riverHalfWidth + 6) {
-        surf = 2; // gravel near river
+      let surf = 4;
+      if (infl.dist < halfW * 0.38) {
+        surf = infl.surface;
+      } else if (infl.dist < halfW) {
+        if (infl.kind === 'water') surf = 7;
+        else if (infl.kind === 'mud') surf = 6;
+        else if (infl.kind === 'rocks' || infl.kind === 'descent') surf = 5;
+        else if (infl.surface === 2) surf = 2;
+        else surf = 1;
+      } else if (infl.dist < halfW + 3) {
+        surf = infl.kind === 'water' || infl.kind === 'mud' ? 6 : 4;
       } else {
-        const slopeProxy = fbm(x * 0.02, z * 0.02, 2);
-        if (h > 160 && slopeProxy > 0.55) surf = 3; // scree
-        else if (h > 140) surf = 5; // rock
-        else if (valley > 0.35) surf = 1; // dirt valley
+        const rocky = fbm(x * 0.02, z * 0.02, 2);
+        if (rocky > 0.82) surf = 5;
         else surf = 4;
       }
       surfaces[idx] = surf;
     }
   }
 
-  // Build Three mesh
   const geo = new THREE.PlaneGeometry(size, size, N, N);
   geo.rotateX(-Math.PI / 2);
   const pos = geo.attributes.position as THREE.BufferAttribute;
@@ -211,102 +218,12 @@ export function createTerrain(scene: THREE.Scene, physics: RapierWorld): Terrain
   geo.setAttribute('aSurface', new THREE.BufferAttribute(surfAttr, 1));
   geo.computeVertexNormals();
 
-  const texRock = rockTex();
-  const texDirt = dirtTex();
-  const texGrass = grassTex();
-  const texTarmac = tarmacTex();
-  texRock.repeat.set(40, 40);
-  texDirt.repeat.set(40, 40);
-  texGrass.repeat.set(50, 50);
-  texTarmac.repeat.set(20, 20);
-
-  const mat = new THREE.ShaderMaterial({
-    uniforms: {
-      uRock: { value: texRock },
-      uDirt: { value: texDirt },
-      uGrass: { value: texGrass },
-      uTarmac: { value: texTarmac },
-      uFogColor: { value: new THREE.Color(0xb8c4ce) },
-      uFogNear: { value: WORLD.fogNear },
-      uFogFar: { value: WORLD.fogFar },
-    },
-    vertexShader: /* glsl */`
-      attribute float aSurface;
-      varying vec2 vUv;
-      varying float vSurf;
-      varying float vSlope;
-      varying float vH;
-      varying float vFog;
-      uniform float uFogNear;
-      uniform float uFogFar;
-      void main() {
-        vUv = uv * 40.0;
-        vSurf = aSurface;
-        vH = position.y;
-        vec3 n = normalize(normal);
-        vSlope = 1.0 - n.y;
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
-        vFog = smoothstep(uFogNear, uFogFar, -mv.z);
-        gl_Position = projectionMatrix * mv;
-      }
-    `,
-    fragmentShader: /* glsl */`
-      uniform sampler2D uRock, uDirt, uGrass, uTarmac;
-      uniform vec3 uFogColor;
-      varying vec2 vUv;
-      varying float vSurf;
-      varying float vSlope;
-      varying float vH;
-      varying float vFog;
-      void main() {
-        vec3 rock = texture2D(uRock, vUv).rgb;
-        vec3 dirt = texture2D(uDirt, vUv).rgb;
-        vec3 grass = texture2D(uGrass, vUv).rgb;
-        vec3 tarmac = texture2D(uTarmac, vUv * 0.5).rgb;
-        vec3 col = grass;
-        float s = floor(vSurf + 0.5);
-        if (s < 0.5) col = tarmac;
-        else if (s < 1.5) col = dirt;
-        else if (s < 2.5) col = mix(dirt, rock, 0.45);
-        else if (s < 3.5) col = mix(rock, dirt, 0.3);
-        else if (s < 4.5) col = mix(grass, dirt, clamp(vSlope * 2.0, 0.0, 0.6));
-        else col = rock;
-        // slope darkening / AO approx
-        col *= 1.0 - vSlope * 0.35;
-        col *= 0.85 + 0.15 * smoothstep(20.0, 180.0, vH);
-        col = mix(col, uFogColor, vFog);
-        gl_FragColor = vec4(col, 1.0);
-      }
-    `,
-  });
-
+  const mat = splatMaterial(textures);
   const mesh = new THREE.Mesh(geo, mat);
   mesh.receiveShadow = true;
+  mesh.castShadow = false;
   scene.add(mesh);
 
-  // Water plane along river
-  const waterGeo = new THREE.PlaneGeometry(size * 0.85, WORLD.riverHalfWidth * 2.4, 1, 1);
-  waterGeo.rotateX(-Math.PI / 2);
-  const waterMat = new THREE.MeshStandardMaterial({
-    color: 0x3a6a7a,
-    transparent: true,
-    opacity: 0.72,
-    roughness: 0.25,
-    metalness: 0.1,
-  });
-  const water = new THREE.Mesh(waterGeo, waterMat);
-  // Sample average river height
-  let wh = 0, wc = 0;
-  for (let ix = 0; ix <= N; ix += 8) {
-    const x = -half + ix * cell;
-    const iz = Math.round((WORLD.riverZ + half) / cell);
-    wh += heights[iz * (N + 1) + ix];
-    wc++;
-  }
-  water.position.set(0, wh / wc + 0.6, WORLD.riverZ);
-  scene.add(water);
-
-  // Trimesh collider from same heights
   const verts = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
     verts[i * 3] = pos.getX(i);
@@ -318,17 +235,18 @@ export function createTerrain(scene: THREE.Scene, physics: RapierWorld): Terrain
   for (let i = 0; i < index.count; i++) indices[i] = index.getX(i);
 
   const body = physics.createRigidBody(RAPIER.RigidBodyDesc.fixed());
-  physics.createCollider(
-    RAPIER.ColliderDesc.trimesh(verts, indices).setFriction(1.0),
+  const terrainCol = physics.createCollider(
+    RAPIER.ColliderDesc.trimesh(verts, indices).setFriction(1.05),
     body,
   );
+  tagCollider(terrainCol, 'dirt');
 
   function heightAt(x: number, z: number): number {
     const fx = (x + half) / cell;
     const fz = (z + half) / cell;
     const x0 = Math.floor(fx);
     const z0 = Math.floor(fz);
-    if (x0 < 0 || z0 < 0 || x0 >= N || z0 >= N) return 20;
+    if (x0 < 0 || z0 < 0 || x0 >= N || z0 >= N) return 14;
     const tx = fx - x0;
     const tz = fz - z0;
     const h00 = heights[z0 * (N + 1) + x0];
@@ -347,19 +265,12 @@ export function createTerrain(scene: THREE.Scene, physics: RapierWorld): Terrain
 
   return {
     mesh,
-    water,
+    trail,
     heightAt,
     surfaceAt,
-    road,
     dispose: () => {
       geo.dispose();
       mat.dispose();
-      waterGeo.dispose();
-      waterMat.dispose();
-      texRock.dispose();
-      texDirt.dispose();
-      texGrass.dispose();
-      texTarmac.dispose();
     },
   };
 }
@@ -371,28 +282,60 @@ export type SpawnPose = {
   yaw: number;
 };
 
-/**
- * Full Himalayan world: terrain + props + sky + dust particles.
- * Prefer this factory when wiring a new entrypoint; existing main.ts may
- * still compose createTerrain / createProps / createSky separately.
- */
 export class World {
+  readonly trail: TrailNetwork;
   readonly terrain: TerrainSystem;
-  readonly props: PropsSystem;
+  readonly water: WaterSystem;
+  readonly vegetation: VegetationSystem;
+  readonly obstacles: ObstacleSystem;
   readonly sky: SkySystem;
   readonly particles: ParticleSystem;
+  readonly occluders: OcclusionHash;
+  readonly textures: EnvTextures;
 
-  constructor(scene: THREE.Scene, physics: RapierWorld) {
-    this.sky = createSky(scene);
-    this.terrain = createTerrain(scene, physics);
-    this.props = createProps(
-      scene,
-      physics,
-      this.terrain.road,
-      this.terrain.heightAt,
-      this.terrain.surfaceAt,
-    );
-    this.particles = new ParticleSystem(scene);
+  private constructor(
+    trail: TrailNetwork,
+    terrain: TerrainSystem,
+    water: WaterSystem,
+    vegetation: VegetationSystem,
+    obstacles: ObstacleSystem,
+    sky: SkySystem,
+    particles: ParticleSystem,
+    occluders: OcclusionHash,
+    textures: EnvTextures,
+  ) {
+    this.trail = trail;
+    this.terrain = terrain;
+    this.water = water;
+    this.vegetation = vegetation;
+    this.obstacles = obstacles;
+    this.sky = sky;
+    this.particles = particles;
+    this.occluders = occluders;
+    this.textures = textures;
+  }
+
+  static async create(
+    scene: THREE.Scene,
+    physics: RapierWorld,
+    renderer?: THREE.WebGLRenderer,
+  ): Promise<World> {
+    const textures = await loadEnvTextures();
+    if (renderer) {
+      const hdr = await loadEnvMap(renderer);
+      if (hdr) scene.environment = hdr;
+      else applyCarEnvironment(renderer, scene);
+    }
+
+    const sky = createSky(scene);
+    const trail = new TrailNetwork();
+    const terrain = createTerrain(scene, physics, trail, textures);
+    const water = createWater(scene, trail, terrain.heightAt);
+    const occluders = new OcclusionHash(18);
+    const vegetation = createVegetation(scene, physics, trail, terrain.heightAt, occluders, textures);
+    const obstacles = createObstacles(scene, physics, trail, terrain.heightAt, occluders, textures);
+    const particles = new ParticleSystem(scene);
+    return new World(trail, terrain, water, vegetation, obstacles, sky, particles, occluders, textures);
   }
 
   heightAt(x: number, z: number): number {
@@ -403,36 +346,50 @@ export class World {
     return this.terrain.surfaceAt(x, z);
   }
 
+  waterHeightAt(x: number, z: number): number {
+    return this.water.heightAt(x, z);
+  }
+
+  distanceToWater(x: number, z: number): number {
+    return this.water.distTo(x, z);
+  }
+
   getSpawnPose(): SpawnPose {
-    const p = this.terrain.road.spawnPoint();
+    const p = this.trail.spawnPoint();
     const y = this.terrain.heightAt(p.x, p.z) + 1.2;
-    return { x: p.x, y, z: p.z, yaw: this.terrain.road.spawnYaw() };
+    return { x: p.x, y, z: p.z, yaw: this.trail.spawnYaw() };
   }
 
-  /** Per-frame env update: props, prayer-flag wind, sun follow. */
   step(dt: number, carPos: THREE.Vector3) {
-    this.props.update(dt, carPos);
+    this.vegetation.update(dt, carPos);
     this.sky.update(dt, carPos);
+    this.water.update(dt);
   }
 
-  /** Emit + advance dust from external wheel sources. */
   updateParticles(
     sources: DustSource[],
     carVel: { x: number; z: number },
     dt: number,
   ) {
     this.particles.emitFromSources(sources, carVel);
+    this.particles.emitWater(sources, carVel, (x, z) => this.water.heightAt(x, z));
     this.particles.update(dt);
   }
 
   dispose() {
     this.particles.dispose();
-    this.props.dispose();
+    this.vegetation.dispose();
+    this.obstacles.dispose();
+    this.water.dispose();
     this.sky.dispose();
     this.terrain.dispose();
   }
 }
 
-export function createWorld(scene: THREE.Scene, rapierWorld: RapierWorld): World {
-  return new World(scene, rapierWorld);
+export async function createWorld(
+  scene: THREE.Scene,
+  rapierWorld: RapierWorld,
+  renderer?: THREE.WebGLRenderer,
+): Promise<World> {
+  return World.create(scene, rapierWorld, renderer);
 }

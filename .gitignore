@@ -58,3 +58,6 @@ secrets.json
 
 # Storybook
 out-storybook/
+
+.tmp-*
+UploadOffroadVehicles.rar

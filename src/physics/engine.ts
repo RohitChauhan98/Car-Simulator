@@ -33,11 +33,18 @@ export class Engine {
 
   private crankTimer = 0;
   private coldTimer = 0;
+  private catchGrace = 0;
   private hasStartedOnce = false;
   private wobblePhase = 0;
 
   get running() {
     return this.state === 'running' || this.state === 'cranking';
+  }
+
+  /** 0..1 remaining cold-start stumble, for idle lope in audio. */
+  get coldStart(): number {
+    if (this.coldTimer <= 0) return 0;
+    return Math.max(0, Math.min(1, this.coldTimer / ENGINE.coldStartDuration));
   }
 
   /** Instantaneous combustion torque at given rpm & throttle (Nm). */
@@ -56,8 +63,9 @@ export class Engine {
     if (clutchPedal < 0.5 && !inNeutral) return false;
     this.state = 'cranking';
     this.crankTimer = ENGINE.crankTime;
+    this.catchGrace = 0;
     this.fuelCut = false;
-    if (this.rpm < ENGINE.crankRPM) this.rpm = ENGINE.crankRPM * 0.4;
+    if (this.rpm < ENGINE.crankRPM) this.rpm = ENGINE.crankRPM * 0.35;
     return true;
   }
 
@@ -67,6 +75,7 @@ export class Engine {
     this.fuelCut = false;
     this.load = 0;
     this.effectiveThrottle = 0;
+    this.catchGrace = 0;
   }
 
   /**
@@ -76,54 +85,55 @@ export class Engine {
    */
   update(dt: number, driverThrottle: number, clutchReactionTorque: number) {
     if (this.state === 'off' || this.state === 'stalled') {
-      // Dead crank: collapse RPM quickly and ignore combustion. Clutch still
-      // couples against this near-zero shaft in transmission (anti-rollback).
-      this.rpm = Math.max(0, this.rpm - 2800 * dt);
+      // Flywheel coasts down over a few tenths so the last pops can play.
+      this.rpm = Math.max(0, this.rpm - 1100 * dt);
       this.load = 0;
       this.effectiveThrottle = 0;
       this.fuelCut = false;
+      this.catchGrace = 0;
       return;
     }
 
     if (this.state === 'cranking') {
       this.crankTimer -= dt;
-      // starter spins toward crankRPM
       const err = ENGINE.crankRPM - this.rpm;
-      this.rpm += err * 4 * dt;
+      this.rpm += err * 3.4 * dt;
+      if (this.rpm < 70) this.rpm = 70;
       if (this.crankTimer <= 0) {
         this.state = 'running';
-        this.rpm = Math.max(this.rpm, ENGINE.idleRPM * 0.85);
+        this.catchGrace = 0.48;
+        this.rpm = Math.max(this.rpm, ENGINE.crankRPM);
         if (!this.hasStartedOnce) {
           this.coldTimer = ENGINE.coldStartDuration;
           this.hasStartedOnce = true;
         }
       }
-      this.effectiveThrottle = 0.15;
-      this.load = 0.2;
+      this.effectiveThrottle = 0.1;
+      this.load = 0.22;
       return;
     }
 
     // ---- running ----
-    // Soft rev limiter: cut above redline, resume below limiterResumeRPM
+    if (this.catchGrace > 0) this.catchGrace -= dt;
+
     if (this.rpm >= ENGINE.redlineRPM) this.fuelCut = true;
     if (this.fuelCut && this.rpm < ENGINE.limiterResumeRPM) this.fuelCut = false;
 
-    // Idle controller: add throttle when below idle — but not when the clutch is
-    // dragging the crank hard (dump / wrong gear). Otherwise idle fuel fights stall.
     let throttle = Math.max(0, Math.min(1, driverThrottle));
     const clutchLoad = Math.abs(clutchReactionTorque);
-    if (throttle < 0.05 && clutchLoad < 40) {
-      const below = ENGINE.idleRPM - this.rpm;
-      if (below > 0) {
-        const idleAdd = Math.min(
-          ENGINE.idleThrottleMax,
-          (below / ENGINE.idleControlBand) * ENGINE.idleThrottleMax,
-        );
-        throttle = Math.max(throttle, idleAdd);
-      }
+    const idleOk = clutchLoad < 40 || this.catchGrace > 0;
+    if (throttle < 0.05 && idleOk) {
+      const err = ENGINE.idleRPM - this.rpm;
+      const p = Math.max(
+        -ENGINE.idleThrottleMax,
+        Math.min(ENGINE.idleThrottleMax, (err / ENGINE.idleControlBand) * ENGINE.idleThrottleMax),
+      );
+      throttle = Math.max(throttle, Math.max(0, ENGINE.idleHoldThrottle + p));
+    }
+    if (this.catchGrace > 0) {
+      throttle = Math.max(throttle, 0.4);
     }
 
-    // Cold-start idle wobble
     if (this.coldTimer > 0) {
       this.coldTimer -= dt;
       this.wobblePhase += dt * 11;
@@ -135,17 +145,14 @@ export class Engine {
 
     const comb = this.combustionTorque(this.rpm, throttle);
     const drag = ENGINE.dragTorque(this.rpm);
-    // Net torque on crankshaft. clutchReactionTorque is opposing when engine drives wheels.
     const net = comb - drag - clutchReactionTorque;
-    // τ = I α ; ω_rpm = ω_rad * 60 / (2π)
     const alphaRad = net / ENGINE.inertia;
     this.rpm += (alphaRad * 60) / (2 * Math.PI) * dt;
 
     if (this.rpm > ENGINE.maxRPM) this.rpm = ENGINE.maxRPM;
     if (this.rpm < 0) this.rpm = 0;
 
-    // Stall: below stallRPM while clutch is loading the engine enough to drag it down
-    if (this.rpm < ENGINE.stallRPM) {
+    if (this.rpm < ENGINE.stallRPM && this.catchGrace <= 0) {
       this.state = 'stalled';
       this.fuelCut = false;
       this.load = 0;

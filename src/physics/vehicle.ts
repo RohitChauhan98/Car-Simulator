@@ -1,10 +1,12 @@
-import RAPIER, { World, RigidBody, Ray } from '@dimforge/rapier3d-compat';
+import RAPIER, { World, RigidBody, Ray, type Collider } from '@dimforge/rapier3d-compat';
 import {
-  CHASSIS, SUSPENSION, STEERING, TIRES, SURFACES,
+  SUSPENSION, STEERING, TIRES, SURFACES, TRANSMISSION,
+  type VehicleSpec,
 } from '../config';
 import { Powertrain, PowertrainEvent } from './transmission';
 import { Brakes } from './brakes';
 import { tireForces, surfaceRolling } from './tires';
+import { applyHydrodynamics } from './hydro';
 
 /** Pedal/steer state consumed each physics step (from Input or tests). */
 export type VehicleControls = {
@@ -20,6 +22,8 @@ export type WheelVisual = {
   steer: number;
   spin: number;
   compression: number;
+  /** Suspension length change rate (m/s); positive = compressing. */
+  compressionVel: number;
   grounded: boolean;
   surfaceId: number;
   slip: number;
@@ -46,6 +50,8 @@ export type VehicleSnapshot = {
   brakeTemp: number;
   steerAngle: number;
   stalled: boolean;
+  /** 0..1 cold-start idle stumble. */
+  coldStart: number;
 };
 
 type WheelInternal = {
@@ -57,6 +63,7 @@ type WheelInternal = {
   spin: number;
   steer: number;
   compression: number;
+  compressionVel: number;
   grounded: boolean;
   surfaceId: number;
   slip: number;
@@ -93,16 +100,18 @@ function lerp(a: number, b: number, t: number) {
 
 /**
  * Custom 4-wheel raycast vehicle on a Rapier dynamic chassis.
- * Forward = -Z, up = +Y. Rear-wheel drive.
+ * Forward = -Z, up = +Y. AWD via TRANSMISSION.driveBiasRear.
  *
  * Wiring (main):
- *   const v = new Vehicle(world, spawn);
+ *   const v = new Vehicle(world, spawn, spec);
  *   v.setGetSurface((x, z) => terrain.surfaceAt(x, z));
  *   // fixed step: v.handleActions(...); v.step(world, dt, controls); world.step();
  *   // render: const pose = v.getInterpolated(alpha); carMesh.update(...);
  */
 export class Vehicle {
   body: RigidBody;
+  chassisCollider: Collider;
+  spec: VehicleSpec;
   powertrain = new Powertrain();
   brakes = new Brakes();
   wheels: WheelInternal[];
@@ -112,6 +121,8 @@ export class Vehicle {
   private stallImpulsePending = false;
   /** Injected surface lookup; defaults to tarmac (0). */
   private getSurface: (x: number, z: number) => number = () => 0;
+  /** Water surface Y, or -Infinity off-patch. Isolated hydro in applyHydrodynamics. */
+  private getWaterHeight: (x: number, z: number) => number = () => Number.NEGATIVE_INFINITY;
   private lastClutchSlip = 0;
   private lastClutchLocked = false;
   private lastHandbrake = false;
@@ -121,7 +132,12 @@ export class Vehicle {
   currPos = { x: 0, y: 0, z: 0 };
   currRot = { x: 0, y: 0, z: 0, w: 1 };
 
-  constructor(world: World, spawn: { x: number; y: number; z: number }) {
+  constructor(
+    world: World,
+    spawn: { x: number; y: number; z: number },
+    spec: VehicleSpec,
+  ) {
+    this.spec = spec;
     const desc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(spawn.x, spawn.y, spawn.z)
       .setCanSleep(false)
@@ -130,22 +146,22 @@ export class Vehicle {
       .setAngularDamping(0.35);
     this.body = world.createRigidBody(desc);
 
-    const he = CHASSIS.halfExtents;
+    const he = spec.halfExtents;
     const collider = RAPIER.ColliderDesc.cuboid(he.x, he.y, he.z)
       .setFriction(0.4)
       .setRestitution(0.05)
       .setDensity(0);
-    world.createCollider(collider, this.body);
+    this.chassisCollider = world.createCollider(collider, this.body);
 
     this.body.setAdditionalMassProperties(
-      CHASSIS.mass,
-      CHASSIS.comOffset,
-      CHASSIS.inertia,
+      spec.mass,
+      spec.comOffset,
+      spec.inertia,
       { x: 0, y: 0, z: 0, w: 1 },
       true,
     );
 
-    const A = SUSPENSION.attach;
+    const A = spec.attach;
     this.wheels = [
       { attach: { x: -A.halfTrack, y: A.y, z: A.frontZ }, isFront: true, isLeft: true },
       { attach: { x: A.halfTrack, y: A.y, z: A.frontZ }, isFront: true, isLeft: false },
@@ -158,6 +174,7 @@ export class Vehicle {
       spin: 0,
       steer: 0,
       compression: 0,
+      compressionVel: 0,
       grounded: false,
       surfaceId: 0,
       slip: 0,
@@ -169,9 +186,17 @@ export class Vehicle {
     this.syncPose(true);
   }
 
+  dispose(world: World) {
+    world.removeRigidBody(this.body);
+  }
+
   /** Inject terrain surface id lookup used per wheel contact. */
   setGetSurface(fn: (x: number, z: number) => number) {
     this.getSurface = fn;
+  }
+
+  setWaterHeightAt(fn: (x: number, z: number) => number) {
+    this.getWaterHeight = fn;
   }
 
   /** @deprecated alias — prefer setGetSurface */
@@ -215,6 +240,7 @@ export class Vehicle {
       steer: w.steer,
       spin: w.spin,
       compression: w.compression,
+      compressionVel: w.compressionVel,
       grounded: w.grounded,
       surfaceId: w.surfaceId,
       slip: w.slip,
@@ -242,7 +268,14 @@ export class Vehicle {
         case 'gear3': this.powertrain.requestGear(3, clutch); break;
         case 'gear4': this.powertrain.requestGear(4, clutch); break;
         case 'gear5': this.powertrain.requestGear(5, clutch); break;
-        case 'ignition': this.powertrain.tryIgnition(clutch); break;
+        case 'ignition':
+          // R is the usual reverse key. Only crank when the engine is dead.
+          if (this.powertrain.engine.running) {
+            this.powertrain.requestGear(-1, clutch);
+          } else {
+            this.powertrain.tryIgnition(clutch);
+          }
+          break;
       }
     }
   }
@@ -272,7 +305,8 @@ export class Vehicle {
     );
     this.steerAngle = input.steer * maxSteer;
 
-    const rayLen = SUSPENSION.restLength + SUSPENSION.maxTravel + SUSPENSION.wheelRadius;
+    const R = this.spec.wheelRadius;
+    const rayLen = SUSPENSION.restLength + SUSPENSION.maxTravel + R;
     const compressions: number[] = [];
 
     for (let i = 0; i < 4; i++) {
@@ -301,11 +335,12 @@ export class Vehicle {
       if (hit) {
         const toi = hit.timeOfImpact;
         const dist = toi - 0.05;
-        const suspLen = Math.max(0, dist - SUSPENSION.wheelRadius);
+        const suspLen = Math.max(0, dist - R);
         const compression = SUSPENSION.restLength - suspLen;
         const clampedComp = Math.max(0, Math.min(SUSPENSION.maxTravel, compression));
         const compressionVel = (w.prevLength - suspLen) / dt;
         w.prevLength = suspLen;
+        w.compressionVel = compressionVel;
 
         let springF = SUSPENSION.stiffness * clampedComp;
         const damp = compressionVel > 0
@@ -331,14 +366,15 @@ export class Vehicle {
           z: origin.z + down.z * toi,
         };
         w.worldPos = {
-          x: hitPoint.x + up.x * SUSPENSION.wheelRadius,
-          y: hitPoint.y + up.y * SUSPENSION.wheelRadius,
-          z: hitPoint.z + up.z * SUSPENSION.wheelRadius,
+          x: hitPoint.x + up.x * R,
+          y: hitPoint.y + up.y * R,
+          z: hitPoint.z + up.z * R,
         };
         w.surfaceId = this.getSurface(hitPoint.x, hitPoint.z);
       } else {
         w.grounded = false;
         w.compression = 0;
+        w.compressionVel = 0;
         w.load = 0;
         w.prevLength = SUSPENSION.restLength;
         compressions[i] = 0;
@@ -354,8 +390,12 @@ export class Vehicle {
     this.applyAntiRoll(0, 1, compressions, up, q, t, dt);
     this.applyAntiRoll(2, 3, compressions, up, q, t, dt);
 
-    const rearOmega = (this.wheels[2].omega + this.wheels[3].omega) * 0.5;
-    const pt = this.powertrain.update(dt, input.throttle, input.clutch, rearOmega);
+    const rearBias = Math.max(0, Math.min(1, TRANSMISSION.driveBiasRear ?? 1));
+    const frontBias = 1 - rearBias;
+    const drivenOmega =
+      (this.wheels[0].omega + this.wheels[1].omega) * 0.5 * frontBias +
+      (this.wheels[2].omega + this.wheels[3].omega) * 0.5 * rearBias;
+    const pt = this.powertrain.update(dt, input.throttle, input.clutch, drivenOmega);
     this.pendingEvents.push(...pt.events);
     this.lastClutchSlip = pt.clutchSlip;
     this.lastClutchLocked = pt.clutchLocked;
@@ -392,7 +432,7 @@ export class Vehicle {
       const vLong = vel.x * tireForward.x + vel.y * tireForward.y + vel.z * tireForward.z;
       const vLat = vel.x * tireRight.x + vel.y * tireRight.y + vel.z * tireRight.z;
 
-      const R = SUSPENSION.wheelRadius;
+      const R = this.spec.wheelRadius;
       const slipDenom = Math.max(TIRES.slipDenomFloor, Math.abs(vLong));
       const slipRatio = (w.omega * R - vLong) / slipDenom;
       const slipAngle = Math.atan2(vLat, Math.max(TIRES.slipDenomFloor, Math.abs(vLong)));
@@ -401,7 +441,7 @@ export class Vehicle {
       w.slip = Math.abs(slipRatio);
       w.slipLat = Math.abs(slipAngle);
 
-      const applyY = TIRES.rollInfluence * SUSPENSION.wheelRadius;
+      const applyY = TIRES.rollInfluence * R;
       const applyAt = {
         x: w.worldPos.x + up.x * applyY,
         y: w.worldPos.y + up.y * applyY,
@@ -424,9 +464,9 @@ export class Vehicle {
       const brakeT = brakeOut.torques[i] * Math.sign(w.omega || vLong || 1);
       const tireReaction = -Fx * R;
       const netT = driveT - brakeT + tireReaction;
-      const rr = surfaceRolling(w.surfaceId) * CHASSIS.rollingResistance * 0.25
+      const rr = surfaceRolling(w.surfaceId) * this.spec.rollingResistance * 0.25
         * Math.sign(w.omega || 1) * R * 0.15;
-      w.omega += ((netT - rr) / SUSPENSION.wheelInertia) * dt;
+      w.omega += ((netT - rr) / this.spec.wheelInertia) * dt;
       if (Math.abs(w.omega) > 800) w.omega = Math.sign(w.omega) * 800;
       w.spin += w.omega * dt;
 
@@ -441,7 +481,7 @@ export class Vehicle {
       }
     }
 
-    const drag = CHASSIS.dragCoef * speedMs * speedMs;
+    const drag = this.spec.dragCoef * speedMs * speedMs;
     if (speedMs > 0.1) {
       this.body.applyImpulse(
         { x: (-lv.x / speedMs) * drag * dt, y: 0, z: (-lv.z / speedMs) * drag * dt },
@@ -457,6 +497,8 @@ export class Vehicle {
       );
       this.body.applyTorqueImpulse({ x: 0, y: (Math.random() - 0.5) * 60, z: 0 }, true);
     }
+
+    applyHydrodynamics(this.body, this.wheels, R, this.getWaterHeight, dt);
   }
 
   private applyAntiRoll(
@@ -488,7 +530,7 @@ export class Vehicle {
     const q = this.body.rotation();
     const bodyUp = quatRotate(q, { x: 0, y: 1, z: 0 });
     if (bodyUp.y < 0.15 || t.y < -50) {
-      const y = heightAt(t.x, t.z) + 1.5;
+      const y = heightAt(t.x, t.z) + this.spec.halfExtents.y + this.spec.wheelRadius + 0.35;
       this.body.setTranslation({ x: t.x, y, z: t.z }, true);
       const yaw = Math.atan2(
         2 * (q.w * q.y + q.x * q.z),
@@ -523,6 +565,7 @@ export class Vehicle {
       brakeTemp: this.brakes.temperature,
       steerAngle: this.steerAngle,
       stalled: st === 'stalled' || st === 'off',
+      coldStart: this.powertrain.engine.coldStart,
     };
   }
 }

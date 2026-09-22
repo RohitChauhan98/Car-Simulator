@@ -30,6 +30,7 @@ const ENGINE = {
 
 const TRANSMISSION = {
   gearRatios: [4.05, 2.15, 1.42, 1.05, 0.82],
+  reverseRatio: 3.9,
   finalDrive: 4.30,
   efficiency: 0.9,
   clutchMaxTorque: 420,
@@ -40,15 +41,44 @@ const TRANSMISSION = {
   hillHoldTorqueNm: 95,
 };
 
-const WHEEL_R = 0.34;
+const WHEEL_R = 0.48;
 
-/** Low-speed tire Fx must share Pacejka sign (positive slip → forward push). */
-function lowSpeedLongFx(slipRatio, load) {
-  return slipRatio * load * 0.35;
+const TIRES = {
+  longB: 10.0,
+  longC: 1.35,
+  longSlipForceCap: 0.22,
+  loadSensitivity: 0.000018,
+};
+
+/**
+ * Low-speed tire Fx — mirrors src/physics/tires.ts crawl blend.
+ * Scales so |slip| at the force cap → peak μ (hill starts stay hooked up).
+ */
+function lowSpeedLongFx(slipRatio, load, grip = 0.72) {
+  const D = grip * load;
+  const cap = TIRES.longSlipForceCap;
+  const slipForFx =
+    Math.abs(slipRatio) <= cap ? slipRatio : Math.sign(slipRatio) * cap;
+  return Math.max(-D, Math.min(D, (slipForFx / cap) * D));
+}
+
+function pacejka(slip, B, C, D) {
+  return D * Math.sin(C * Math.atan(B * slip));
+}
+
+/** Longitudinal force with force-cap (mirrors src/physics/tires.ts). */
+function longFx(slipRatio, load, grip) {
+  const muPeak = grip * (1 - TIRES.loadSensitivity * load);
+  const D = muPeak * load;
+  const cap = TIRES.longSlipForceCap;
+  const slipForFx =
+    Math.abs(slipRatio) <= cap ? slipRatio : Math.sign(slipRatio) * cap;
+  return pacejka(slipForFx, TIRES.longB, TIRES.longC, D);
 }
 
 function ratioFor(gear) {
   if (gear === 0) return 0;
+  if (gear === -1) return -TRANSMISSION.reverseRatio * TRANSMISSION.finalDrive;
   return TRANSMISSION.gearRatios[gear - 1] * TRANSMISSION.finalDrive;
 }
 
@@ -179,6 +209,22 @@ function check(name, cond, detail = '') {
   check('low-speed tire Fx > 0 for positive slip', Fx > 0, `Fx=${Fx}`);
 }
 
+// 5b) Crawl hill-start: capped wheelspin must deliver near-peak μ (not ~10% of D)
+{
+  const load = 3000;
+  const grip = 0.72;
+  const D = grip * load;
+  const Fx = lowSpeedLongFx(5.0, load, grip); // deep wheelspin, force-capped
+  check('low-speed wheelspin Fx near peak grip', Fx > D * 0.9,
+    `Fx=${Fx.toFixed(0)} D=${D.toFixed(0)}`);
+  const mass = 1720;
+  // AWD: all four contact patches at static load share
+  const fxAwd = lowSpeedLongFx(5.0, (mass * 9.81) / 4, 0.72) * 4;
+  const need12 = mass * 9.81 * 0.12;
+  check('AWD crawl Fx climbs ~12% grade', fxAwd > need12,
+    `Fx=${fxAwd.toFixed(0)} need=${need12.toFixed(0)}`);
+}
+
 // 6) Spawn yaw for -Z-forward chassis aligns with +X road tangent
 {
   const tx = 80, tz = 2;
@@ -234,9 +280,18 @@ function check(name, cond, detail = '') {
     `drive=${fullThrottleStandstill.driveTorque.toFixed(0)} state=${fullThrottleStandstill.state}`);
 }
 
+// 10b) Reverse standstill: clutch must send negative wheel torque (backup)
+{
+  const rev = simulateDumpClutch({
+    gear: -1, throttle: 1, clutchPedal: 0, seconds: 0.04, rpm0: 4000,
+  });
+  check('reverse full-throttle standstill drive is large -', rev.driveTorque < -2000,
+    `drive=${rev.driveTorque.toFixed(0)} state=${rev.state} ratio=${ratioFor(-1).toFixed(2)}`);
+}
+
 // 11) Grade climb estimate: full throttle 1st should exceed ~10% grade demand
 {
-  const mass = 1350;
+  const mass = 1720;
   const grade = 0.10;
   const needN = mass * 9.81 * grade;
   const needWheelNm = needN * WHEEL_R;
@@ -245,6 +300,21 @@ function check(name, cond, detail = '') {
   const availWheel = engNm * ratioFor(1) * TRANSMISSION.efficiency;
   check('1st @ 3500rpm can climb ~10% grade', availWheel > needWheelNm * 1.15,
     `avail=${availWheel.toFixed(0)} need=${needWheelNm.toFixed(0)}`);
+}
+
+// 12) Tire traction under wheelspin: 1st @ high RPM on dirt must still push uphill
+// (previously Pacejka C≈1.85 collapsed Fx to ~27% of peak → "no traction" climb fail)
+{
+  const mass = 1720;
+  const loadWheel = (mass * 9.81) / 4;
+  const slipSpin = 5.0; // ≈ 1st locked at ~5k rpm, chassis nearly stopped
+  const fxSpin = longFx(slipSpin, loadWheel, 0.72) * 2; // both driven wheels
+  const need15 = mass * 9.81 * 0.15;
+  check('dirt wheelspin Fx still climbs ~15% grade', fxSpin > need15,
+    `Fx2=${fxSpin.toFixed(0)} need15%=${need15.toFixed(0)}`);
+  const fxPeak = longFx(0.12, loadWheel, 0.72) * 2;
+  check('wheelspin Fx stays near peak (not falling flank)', fxSpin > fxPeak * 0.85,
+    `spin=${fxSpin.toFixed(0)} peak=${fxPeak.toFixed(0)}`);
 }
 
 if (failed > 0) {

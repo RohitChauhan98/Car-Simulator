@@ -9,7 +9,7 @@ export type PowertrainEvent =
   | { type: 'ignitionDenied' };
 
 export type PowertrainOutput = {
-  /** Drive torque at each rear wheel (Nm), RWD split. Front always 0. */
+  /** Drive torque at each wheel (Nm), AWD split via TRANSMISSION.driveBiasRear. */
   wheelDriveTorque: [number, number, number, number];
   events: PowertrainEvent[];
   clutchSlip: number;       // |ω_e - ω_t| rad/s when slipping
@@ -86,19 +86,19 @@ export class Powertrain {
   }
 
   /**
-   * @param rearWheelOmega average rear wheel angular velocity (rad/s), chassis-forward positive
+   * @param drivenWheelOmega average driven-wheel angular velocity (rad/s), chassis-forward positive
    *        (wheel spinning for forward travel is positive when rolling forward = -Z body).
    */
   update(
     dt: number,
     throttle: number,
     clutchPedal: number,
-    rearWheelOmega: number,
+    drivenWheelOmega: number,
   ): PowertrainOutput {
     const prevState = this.engine.state;
     const ratio = this.ratio;
     // Gearbox input shaft speed from wheels (through final drive + gear)
-    const gearboxOmega = ratio === 0 ? 0 : rearWheelOmega * ratio;
+    const gearboxOmega = ratio === 0 ? 0 : drivenWheelOmega * ratio;
 
     // Clutch engagement: pedal 1 = fully disengaged, 0 = fully engaged
     const engage = 1 - Math.max(0, Math.min(1, clutchPedal));
@@ -106,7 +106,7 @@ export class Powertrain {
     const capacity = TRANSMISSION.clutchMaxTorque * engageSq; // progressive bite
 
     // Approx longitudinal speed from driven wheels (for soft hill-hold gating)
-    const speedMs = Math.abs(rearWheelOmega) * SUSPENSION.wheelRadius;
+    const speedMs = Math.abs(drivenWheelOmega) * SUSPENSION.wheelRadius;
 
     const sub = PHYSICS.engineSubsteps;
     const h = dt / sub;
@@ -145,7 +145,7 @@ export class Powertrain {
           // Forward gears: oppose negative (rollback) wheel omega.
           // Reverse gear (ratio < 0): oppose positive wheel omega (rolling "forward").
           const creepOpposesGear =
-            ratio > 0 ? rearWheelOmega < -0.05 : rearWheelOmega > 0.05;
+            ratio > 0 ? drivenWheelOmega < -0.05 : drivenWheelOmega > 0.05;
           if (creepOpposesGear) {
             // Torque at clutch that yields forward-ish wheel drive (sign via ratio).
             const hold = TRANSMISSION.hillHoldTorqueNm * engageSq;
@@ -183,10 +183,12 @@ export class Powertrain {
     if (ratio !== 0) {
       drive = avgClutchToGearbox * ratio * TRANSMISSION.efficiency;
     }
-    const half = drive * 0.5;
+    const rearBias = Math.max(0, Math.min(1, TRANSMISSION.driveBiasRear));
+    const rearShare = drive * rearBias * 0.5;
+    const frontShare = drive * (1 - rearBias) * 0.5;
 
     return {
-      wheelDriveTorque: [0, 0, half, half],
+      wheelDriveTorque: [frontShare, frontShare, rearShare, rearShare],
       events: this.drainEvents(),
       clutchSlip: avgSlip,
       clutchLocked: locked && engage > 0.9,

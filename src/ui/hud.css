@@ -264,6 +264,29 @@ body,
   display: flex;
 }
 
+/* —— vehicle audio debug (?audioDebug) —— */
+
+.audio-debug {
+  position: absolute;
+  left: 14px;
+  top: 14px;
+  margin: 0;
+  padding: 10px 12px;
+  max-width: 360px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: 0.02em;
+  color: rgba(232, 236, 240, 0.88);
+  background: rgba(8, 10, 14, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  backdrop-filter: blur(6px);
+  pointer-events: none;
+  white-space: pre;
+  z-index: 14;
+}
+
 .bar-row {
   display: flex;
   align-items: center;
@@ -533,12 +556,12 @@ body,
   inset: 0;
   z-index: 20;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
+  padding-top: 4vh;
+  pointer-events: none;
   background:
-    radial-gradient(ellipse at 30% 20%, rgba(90, 120, 150, 0.35), transparent 50%),
-    radial-gradient(ellipse at 70% 80%, rgba(60, 40, 30, 0.4), transparent 45%),
-    linear-gradient(160deg, #1a2430 0%, #0c1018 55%, #1a1510 100%);
+    linear-gradient(180deg, rgba(10, 14, 20, 0.55) 0%, rgba(10, 14, 20, 0.12) 42%, rgba(10, 14, 20, 0.28) 100%);
 }
 
 #start-overlay.hidden {
@@ -546,10 +569,12 @@ body,
 }
 
 .start-card {
+  pointer-events: auto;
   text-align: center;
-  padding: 40px 48px;
-  max-width: 480px;
-  background: rgba(10, 14, 20, 0.45);
+  padding: 20px 22px 22px;
+  max-width: 640px;
+  width: min(640px, calc(100vw - 32px));
+  background: rgba(10, 14, 20, 0.58);
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 14px;
   backdrop-filter: blur(10px);
@@ -557,16 +582,65 @@ body,
 }
 
 .start-card h1 {
-  font-size: 42px;
+  font-size: 32px;
   font-weight: 700;
   letter-spacing: 0.04em;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .start-card .subtitle {
   opacity: 0.65;
-  margin-bottom: 28px;
+  margin-bottom: 18px;
   font-size: 15px;
+}
+
+.garage {
+  display: flex;
+  gap: 10px;
+  margin: 0 0 22px;
+  justify-content: center;
+}
+
+.garage-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  padding: 12px 12px 14px;
+  transition: border-color 0.15s, background 0.15s, transform 0.1s;
+}
+
+.garage-card:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.28);
+  transform: translateY(-1px);
+}
+
+.garage-card.selected {
+  border-color: #c45c2a;
+  background: rgba(196, 92, 42, 0.22);
+}
+
+.garage-card:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.garage-name {
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  font-size: 15px;
+}
+
+.garage-blurb {
+  font-size: 12px;
+  opacity: 0.7;
+  line-height: 1.35;
 }
 
 #start-btn {
@@ -607,6 +681,14 @@ body,
 }
 
 @media (max-width: 640px) {
+  .garage {
+    flex-direction: column;
+  }
+
+  .start-card {
+    padding: 20px 16px 24px;
+  }
+
   .gauge {
     width: 120px;
     height: 120px;
