@@ -14,6 +14,11 @@ function pacejka(slip: number, B: number, C: number, D: number): number {
 /**
  * Simplified Pacejka + friction circle, with low-speed viscous blend for
  * numerical stability when the slip-ratio denominator would blow up.
+ *
+ * Longitudinal slip used for *force* is soft-capped: full-throttle 1st on a
+ * grade easily produces slip ratios ≫ 1 (wheelspin). Uncapped Pacejka with
+ * C>1 rides the falling flank and leaves ~¼ peak Fx — looks like "no traction"
+ * despite high RPM. Cap keeps push near peak μ while real slip still drives FX.
  */
 export function tireForces(
   slipRatio: number,
@@ -28,7 +33,13 @@ export function tireForces(
   const muPeak = surf.grip * (1 - TIRES.loadSensitivity * load);
   const D = muPeak * load;
 
-  let Fx = pacejka(slipRatio, TIRES.longB, TIRES.longC, D);
+  const cap = TIRES.longSlipForceCap;
+  const slipForFx =
+    Math.abs(slipRatio) <= cap
+      ? slipRatio
+      : Math.sign(slipRatio) * cap;
+
+  let Fx = pacejka(slipForFx, TIRES.longB, TIRES.longC, D);
   let Fy = -pacejka(slipAngle, TIRES.latB, TIRES.latC, D);
 
   // Friction ellipse: scale if combined demand exceeds peak
@@ -39,17 +50,26 @@ export function tireForces(
     Fy *= s;
   }
 
-  // Low-speed viscous blend toward a damping model.
-  // Longitudinal: same sign as Pacejka — positive slip (wheel faster than road)
-  // must push the car forward. (A leading minus here inverted drive at crawl.)
+  // Low-speed blend: slip-ratio Pacejka is ill-conditioned near zero speed, so
+  // we mix in a grip-limited damper. Scale so |slip|==cap → ±D (same region as
+  // the Pacejka peak). The old `slip * load * 0.35` only reached ~10% of D at
+  // crawl — 1st gear revs high but the car couldn't climb.
   const absV = Math.abs(speedMs);
   if (absV < TIRES.lowSpeedBlend) {
     const blend = absV / TIRES.lowSpeedBlend;
-    const viscLong = slipRatio * load * 0.35;
+    const viscLong = Math.max(-D, Math.min(D, (slipForFx / Math.max(1e-6, cap)) * D));
     // Lateral: match Pacejka sign (Fy = -pacejka(slipAngle, ...))
-    const viscLat = -slipAngle * load * 0.45;
+    const latCap = 0.35; // rad ≈ peak slip-angle region
+    const ang = Math.max(-latCap, Math.min(latCap, slipAngle));
+    const viscLat = Math.max(-D, Math.min(D, -(ang / latCap) * D));
     Fx = Fx * blend + viscLong * (1 - blend);
     Fy = Fy * blend + viscLat * (1 - blend);
+    const comb2 = Math.hypot(Fx, Fy);
+    if (comb2 > D && comb2 > 1e-6) {
+      const s = D / comb2;
+      Fx *= s;
+      Fy *= s;
+    }
   }
 
   return { long: Fx, lat: Fy, slipRatio, slipAngle };

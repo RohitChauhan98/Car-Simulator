@@ -188,8 +188,8 @@ export class Hud {
           <div class="controls-help">
             <div><b>W/S</b> throttle/brake &nbsp; <b>A/D</b> steer</div>
             <div><b>Clutch slider</b> (left) or <b>Shift</b> — springs back when released</div>
-            <div><b>Q/E</b> shift &nbsp; <b>1–5</b> gears &nbsp; <b>\`/0</b> reverse &nbsp; <b>N</b> neutral</div>
-            <div><b>R</b> ignition &nbsp; <b>Space</b> handbrake &nbsp; <b>C</b> camera &nbsp; <b>H</b> bars</div>
+            <div><b>Q/E</b> shift (Q from N = reverse) &nbsp; <b>R</b> reverse &nbsp; <b>1–5</b> gears &nbsp; <b>N</b> neutral</div>
+            <div><b>R</b> also starts when the engine is off (hold clutch or N) &nbsp; <b>Space</b> handbrake &nbsp; <b>C</b> camera &nbsp; <b>H</b> bars</div>
           </div>
         </div>
       </div>
@@ -201,19 +201,21 @@ export class Hud {
             <div><b>W / S</b> throttle / brake &nbsp; <b>A / D</b> steer</div>
             <div><b>Clutch slider</b> (left edge) — drag down to press; springs back on release</div>
             <div><b>Left Shift</b> clutch (hold, accessibility)</div>
-            <div><b>Q / E</b> shift down / up</div>
-            <div><b>1–5</b> direct gear &nbsp; <b>\` or 0</b> reverse &nbsp; <b>N</b> neutral</div>
-            <div><b>R</b> ignition / restart (clutch pressed or neutral)</div>
+            <div><b>Q / E</b> shift down / up (Q from N selects reverse)</div>
+            <div><b>1–5</b> direct gear &nbsp; <b>R</b> reverse (when running) &nbsp; <b>\` or 0</b> reverse &nbsp; <b>N</b> neutral</div>
+            <div><b>R</b> also starts the engine when it is off (clutch pressed or N)</div>
             <div><b>Space</b> handbrake</div>
             <div><b>C</b> camera &nbsp; <b>H</b> input bars &nbsp; <b>P</b> pause</div>
+            <div><b>Mouse</b> orbit camera (click to lock) &nbsp; <b>scroll</b> zoom &nbsp; <b>RMB</b> look</div>
+            <div>Add <b>?audioDebug</b> to the URL for live vehicle audio meters</div>
           </div>
           <h3>Driving tips</h3>
           <ul class="help-tips">
             <li>Use the left clutch slider for progressive bite; Shift is on/off.</li>
-            <li>Hold the clutch to start the engine and to shift gears.</li>
+            <li>Hold clutch, press <b>R</b> for reverse, then W to go backward (S is still brake).</li>
             <li>Release the clutch gently in 1st to pull away without stalling.</li>
             <li>In gear with clutch up, the driveline resists rollback (engine braking).</li>
-            <li>Wrong gear or dumping the clutch can stall the engine — restart with clutch + R.</li>
+            <li>Wrong gear or dumping the clutch can stall the engine — restart with clutch + R (starter motor).</li>
           </ul>
           <p class="help-hint">Press <b>I</b> or <b>Esc</b> to close</p>
         </div>

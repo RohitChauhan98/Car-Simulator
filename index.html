@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Himalayan Drive</title>
+    <title>Jungle Trail</title>
     <link rel="stylesheet" href="/src/ui/hud.css" />
   </head>
   <body>
@@ -12,18 +12,23 @@
       <div id="hud"></div>
       <div id="start-overlay">
         <div class="start-card">
-          <h1>Himalayan Drive</h1>
-          <p class="subtitle">Manual-transmission mountain driving simulator</p>
-          <button id="start-btn">Start Engine</button>
-          <div class="controls-help">
-            <div><b>W / S</b> throttle / brake</div>
-            <div><b>A / D</b> steer</div>
-            <div><b>Clutch slider</b> (left) or <b>Left Shift</b></div>
-            <div><b>Q / E</b> shift down / up</div>
-            <div><b>1&ndash;5</b> direct gear &nbsp; <b>` or 0</b> reverse &nbsp; <b>N</b> neutral</div>
-            <div><b>Space</b> handbrake &nbsp; <b>R</b> ignition / restart</div>
-            <div><b>C</b> camera &nbsp; <b>H</b> input bars &nbsp; <b>P</b> pause &nbsp; <b>I</b> help</div>
+          <h1>Jungle Trail</h1>
+          <p class="subtitle">Off-road expedition — mouse look, manual gearbox</p>
+          <div class="garage" role="listbox" aria-label="Choose vehicle">
+            <button type="button" class="garage-card selected" data-vehicle="offroad1" role="option" aria-selected="true">
+              <span class="garage-name">Trail SUV</span>
+              <span class="garage-blurb">Tall wagon for mountain climbs</span>
+            </button>
+            <button type="button" class="garage-card" data-vehicle="offroad2" role="option" aria-selected="false">
+              <span class="garage-name">Ridge Runner</span>
+              <span class="garage-blurb">Compact off-roader</span>
+            </button>
+            <button type="button" class="garage-card" data-vehicle="offroad3" role="option" aria-selected="false">
+              <span class="garage-name">Summit Pickup</span>
+              <span class="garage-blurb">Long-wheelbase trail truck</span>
+            </button>
           </div>
+          <button id="start-btn">Start Engine</button>
         </div>
       </div>
     </div>

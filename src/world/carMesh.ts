@@ -1,114 +1,250 @@
 import * as THREE from 'three';
+import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import type { WheelVisual } from '../physics/vehicle';
-import { CHASSIS, SUSPENSION } from '../config';
+import type { VehicleSpec } from '../config';
+import { createTireVisual, type TireVisual } from './tires';
+
+const fbxLoader = new FBXLoader();
+fbxLoader.setResourcePath('/vehicles/');
+const texLoader = new THREE.TextureLoader();
+const fbxCache = new Map<string, Promise<THREE.Group>>();
+const texCache = new Map<string, Promise<THREE.Texture>>();
+
+function loadFbx(url: string): Promise<THREE.Group> {
+  let pending = fbxCache.get(url);
+  if (!pending) {
+    pending = fbxLoader.loadAsync(url);
+    fbxCache.set(url, pending);
+  }
+  return pending;
+}
+
+function loadTexture(url: string): Promise<THREE.Texture> {
+  let pending = texCache.get(url);
+  if (!pending) {
+    pending = texLoader.loadAsync(url).then((t) => {
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.flipY = false;
+      t.wrapS = t.wrapT = THREE.RepeatWrapping;
+      return t;
+    });
+    texCache.set(url, pending);
+  }
+  return pending;
+}
+
+function isWheelName(name: string): boolean {
+  const n = name.toLowerCase();
+  if (/steering/.test(n)) return false;
+  return /(tire|wheel|rim)/.test(n);
+}
+
+/** Match skinned wheel bones: Tire_F_L / Wheel_R_R etc. */
+function classifyWheelBone(name: string): number | null {
+  const n = name.toLowerCase();
+  if (/steering|root/.test(n)) return null;
+  if (!/(tire|wheel)/.test(n)) return null;
+  if (/_f_l/.test(n)) return 0;
+  if (/_f_r/.test(n)) return 1;
+  if (/_r_l/.test(n)) return 2;
+  if (/_r_r/.test(n)) return 3;
+  return null;
+}
+
+function partKind(name: string): 'glass' | 'chrome' | 'light' | 'wheel' | 'body' {
+  const n = name.toLowerCase();
+  if (isWheelName(n)) return 'wheel';
+  if (/(window|glass|windshield|windscreen|windscreen)/.test(n)) return 'glass';
+  if (/(chrome|bumper|grill|grille|exhaust|steel|metal)/.test(n)) return 'chrome';
+  if (/(headlight|taillight|lamp|light)/.test(n)) return 'light';
+  return 'body';
+}
+
+function applyMaterials(root: THREE.Object3D, albedo: THREE.Texture, metal?: THREE.Texture) {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.frustumCulled = false;
+    const kind = partKind(mesh.name);
+    if (kind === 'wheel') {
+      mesh.visible = false;
+      return;
+    }
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const next = mats.map((m) => {
+      const mat = (m as THREE.MeshStandardMaterial).clone();
+      if (!mat.isMeshStandardMaterial) return mat;
+      if (kind === 'glass') {
+        mat.map = null;
+        mat.color.set(0x88aacc);
+        mat.transparent = true;
+        mat.opacity = 0.38;
+        mat.roughness = 0.06;
+        mat.metalness = 0.05;
+        mat.envMapIntensity = 1.6;
+        mat.side = THREE.DoubleSide;
+      } else if (kind === 'chrome') {
+        mat.map = metal ?? null;
+        mat.color.set(0xc8c8d0);
+        mat.metalness = 0.92;
+        mat.roughness = 0.22;
+        mat.envMapIntensity = 1.4;
+      } else if (kind === 'light') {
+        mat.map = null;
+        mat.color.set(0xf2f0e4);
+        mat.emissive.set(0x222018);
+        mat.roughness = 0.35;
+        mat.metalness = 0.2;
+      } else {
+        mat.map = albedo;
+        if (metal) {
+          mat.metalnessMap = metal;
+          mat.metalness = 0.45;
+          mat.roughness = 0.48;
+        } else {
+          mat.metalness = 0.32;
+          mat.roughness = 0.52;
+        }
+        mat.envMapIntensity = 1.1;
+      }
+      mat.needsUpdate = true;
+      return mat;
+    });
+    mesh.material = Array.isArray(mesh.material) ? next : next[0];
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+  });
+}
+
+type WheelBone = {
+  bone: THREE.Bone;
+  restPos: THREE.Vector3;
+  restQuat: THREE.Quaternion;
+};
 
 /**
- * Hatchback from primitives. Driven by interpolated chassis pose + wheel visuals.
- *
- *   const mesh = new CarMesh();
- *   scene.add(mesh.root);
- *   // each frame:
- *   const { position, rotation } = vehicle.getInterpolated(alpha);
- *   mesh.update(position, rotation, vehicle.getWheelVisuals(), brake, vehicle.getSteerAngle());
+ * Off-road FBX body (skinned) plus dedicated physics-posed tires.
  */
 export class CarMesh {
   root = new THREE.Group();
-  private wheelMeshes: THREE.Group[] = [];
+  private wheelBones: (WheelBone | null)[] = [null, null, null, null];
+  private tireVisuals: TireVisual[] = [];
   private brakeLights: THREE.Mesh[] = [];
+  private steerBone: THREE.Bone | null = null;
+  private steerRest = new THREE.Quaternion();
+  private steerQ = new THREE.Quaternion();
   private invQuat = new THREE.Quaternion();
-  private local = new THREE.Vector3();
+  private localPos = new THREE.Vector3();
   cockpit: THREE.Group;
   steeringWheel: THREE.Mesh;
   dash: THREE.Mesh;
+  spec: VehicleSpec;
 
-  constructor(scene?: THREE.Scene) {
-    const he = CHASSIS.halfExtents;
-    const bodyMat = new THREE.MeshStandardMaterial({
-      color: 0xc45c2a,
-      metalness: 0.35,
-      roughness: 0.45,
-    });
-    const dark = new THREE.MeshStandardMaterial({ color: 0x1a1a1c, metalness: 0.4, roughness: 0.6 });
-    const glass = new THREE.MeshStandardMaterial({
-      color: 0x88aacc, metalness: 0.9, roughness: 0.15, transparent: true, opacity: 0.45,
-    });
+  private constructor(spec: VehicleSpec) {
+    this.spec = spec;
+    this.cockpit = new THREE.Group();
+    this.dash = new THREE.Mesh();
+    this.steeringWheel = new THREE.Mesh();
+  }
 
-    const body = new THREE.Mesh(new THREE.BoxGeometry(he.x * 2, he.y * 1.3, he.z * 2), bodyMat);
-    body.position.y = 0.1;
-    body.castShadow = true;
+  static async create(spec: VehicleSpec, scene: THREE.Scene): Promise<CarMesh> {
+    const mesh = new CarMesh(spec);
+    await mesh.build();
+    scene.add(mesh.root);
+    return mesh;
+  }
+
+  private async build() {
+    const spec = this.spec;
+    const [fbx, albedo, metal] = await Promise.all([
+      loadFbx(spec.bodyUrl),
+      loadTexture(spec.albedoUrl),
+      loadTexture('/vehicles/Textures/Metalic_Texture.png'),
+    ]);
+
+    const body = cloneSkinned(fbx) as THREE.Group;
+    applyMaterials(body, albedo, metal);
+    body.scale.setScalar(spec.scale);
+    body.rotation.y = spec.rootYaw;
+    body.position.set(spec.bodyOffset.x, spec.bodyOffset.y, spec.bodyOffset.z);
+    body.updateMatrixWorld(true);
     this.root.add(body);
 
-    const cabin = new THREE.Mesh(new THREE.BoxGeometry(he.x * 1.7, he.y * 1.1, he.z * 1.1), bodyMat);
-    cabin.position.set(0, he.y * 1.05, 0.15);
-    cabin.castShadow = true;
-    this.root.add(cabin);
+    body.traverse((obj) => {
+      if ((obj as THREE.Bone).isBone) {
+        const idx = classifyWheelBone(obj.name);
+        if (idx !== null && !this.wheelBones[idx]) {
+          const bone = obj as THREE.Bone;
+          this.wheelBones[idx] = {
+            bone,
+            restPos: bone.position.clone(),
+            restQuat: bone.quaternion.clone(),
+          };
+          bone.scale.setScalar(0.001);
+        }
+        if (/steering_wheel/i.test(obj.name) && !this.steerBone) {
+          this.steerBone = obj as THREE.Bone;
+          this.steerRest.copy(this.steerBone.quaternion);
+        }
+      }
+      if (isWheelName(obj.name)) obj.visible = false;
+    });
 
-    const windshield = new THREE.Mesh(new THREE.BoxGeometry(he.x * 1.5, he.y * 0.7, 0.08), glass);
-    windshield.position.set(0, he.y * 1.05, -he.z * 0.55);
-    windshield.rotation.x = -0.35;
-    this.root.add(windshield);
+    for (let i = 0; i < 4; i++) {
+      const tv = createTireVisual(spec.wheelRadius, 0.32);
+      tv.group.userData.owned = true;
+      this.root.add(tv.group);
+      this.tireVisuals.push(tv);
+    }
 
-    const hood = new THREE.Mesh(new THREE.BoxGeometry(he.x * 1.85, 0.08, he.z * 0.7), bodyMat);
-    hood.position.set(0, he.y * 0.55, -he.z * 0.65);
-    this.root.add(hood);
-
-    const bumperF = new THREE.Mesh(new THREE.BoxGeometry(he.x * 1.95, 0.28, 0.3), dark);
-    bumperF.position.set(0, -0.15, -he.z - 0.05);
-    this.root.add(bumperF);
-    const bumperR = bumperF.clone();
-    bumperR.position.z = he.z + 0.05;
-    this.root.add(bumperR);
-
+    const he = spec.halfExtents;
     const brakeMat = new THREE.MeshStandardMaterial({
       color: 0x330000, emissive: 0x000000, emissiveIntensity: 1, roughness: 0.5,
     });
     for (const sx of [-0.55, 0.55]) {
-      const bl = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.14, 0.06), brakeMat.clone());
-      bl.position.set(sx, 0.25, he.z + 0.12);
+      const bl = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.1, 0.05), brakeMat.clone());
+      bl.position.set(sx * he.x, 0.15, he.z + 0.02);
+      bl.userData.owned = true;
       this.root.add(bl);
       this.brakeLights.push(bl);
     }
 
-    const tireMat = new THREE.MeshStandardMaterial({ color: 0x1c1c1c, roughness: 0.95 });
-    const rimMat = new THREE.MeshStandardMaterial({ color: 0xb0b0b0, metalness: 0.7, roughness: 0.35 });
-    const R = SUSPENSION.wheelRadius;
-    for (let i = 0; i < 4; i++) {
-      const g = new THREE.Group();
-      const tire = new THREE.Mesh(new THREE.CylinderGeometry(R, R, 0.22, 16), tireMat);
-      tire.rotation.z = Math.PI / 2;
-      tire.castShadow = true;
-      const rim = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.55, R * 0.55, 0.24, 12), rimMat);
-      rim.rotation.z = Math.PI / 2;
-      g.add(tire, rim);
-      this.root.add(g);
-      this.wheelMeshes.push(g);
-    }
-
     this.cockpit = new THREE.Group();
     this.dash = new THREE.Mesh(
-      new THREE.BoxGeometry(1.2, 0.25, 0.5),
+      new THREE.BoxGeometry(1.05, 0.22, 0.42),
       new THREE.MeshStandardMaterial({ color: 0x2a2a2e, roughness: 0.8 }),
     );
-    this.dash.position.set(0, 0.35, -0.55);
+    this.dash.position.set(0, spec.hoodOffset.y - 0.28, spec.hoodOffset.z - 0.35);
+    this.dash.userData.owned = true;
     this.cockpit.add(this.dash);
 
     this.steeringWheel = new THREE.Mesh(
-      new THREE.TorusGeometry(0.18, 0.025, 8, 16),
+      new THREE.TorusGeometry(0.16, 0.022, 8, 16),
       new THREE.MeshStandardMaterial({ color: 0x111111 }),
     );
-    this.steeringWheel.position.set(-0.32, 0.48, -0.35);
+    this.steeringWheel.position.set(
+      spec.hoodOffset.x,
+      spec.hoodOffset.y - 0.12,
+      spec.hoodOffset.z - 0.18,
+    );
     this.steeringWheel.rotation.x = Math.PI / 2.2;
+    this.steeringWheel.userData.owned = true;
     this.cockpit.add(this.steeringWheel);
 
     const seat = new THREE.Mesh(
-      new THREE.BoxGeometry(0.45, 0.5, 0.45),
+      new THREE.BoxGeometry(0.42, 0.48, 0.42),
       new THREE.MeshStandardMaterial({ color: 0x3a3030 }),
     );
-    seat.position.set(-0.32, 0.15, 0.05);
+    seat.position.set(spec.hoodOffset.x, spec.hoodOffset.y - 0.42, spec.hoodOffset.z + 0.22);
+    seat.userData.owned = true;
     this.cockpit.add(seat);
+    this.cockpit.visible = false;
     this.root.add(this.cockpit);
+  }
 
-    if (scene) scene.add(this.root);
+  setInteriorVisible(visible: boolean) {
+    this.cockpit.visible = visible;
   }
 
   update(
@@ -124,18 +260,19 @@ export class CarMesh {
 
     for (let i = 0; i < 4; i++) {
       const w = wheels[i];
-      const m = this.wheelMeshes[i];
-      if (!w) continue;
-      this.local
-        .set(
-          w.position.x - position.x,
-          w.position.y - position.y,
-          w.position.z - position.z,
-        )
+      const tv = this.tireVisuals[i];
+      if (!w || !tv) continue;
+      this.localPos.set(w.position.x, w.position.y, w.position.z)
+        .sub(this.root.position)
         .applyQuaternion(this.invQuat);
-      m.position.copy(this.local);
-      m.rotation.set(0, w.steer, 0);
-      m.rotateX(w.spin);
+      tv.group.position.copy(this.localPos);
+      tv.group.rotation.order = 'YXZ';
+      tv.group.rotation.set(w.spin, w.steer, 0);
+    }
+
+    if (this.steerBone) {
+      this.steerQ.setFromAxisAngle(new THREE.Vector3(0, 0, 1), -steerAngle * 2.5);
+      this.steerBone.quaternion.copy(this.steerRest).multiply(this.steerQ);
     }
 
     for (const bl of this.brakeLights) {
@@ -145,5 +282,18 @@ export class CarMesh {
     }
 
     this.steeringWheel.rotation.z = -steerAngle * 2.5;
+  }
+
+  dispose() {
+    this.root.removeFromParent();
+    for (const tv of this.tireVisuals) tv.dispose();
+    this.tireVisuals = [];
+    this.root.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.userData.owned) return;
+      mesh.geometry.dispose();
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) m.dispose();
+    });
   }
 }

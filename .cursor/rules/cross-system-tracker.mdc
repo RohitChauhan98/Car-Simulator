@@ -1,0 +1,18 @@
+---
+description: World/vehicle visual changes must update docs/TRACKER.md with physics, audio, and VFX follow-ups.
+alwaysApply: true
+---
+
+# Cross-system tracker
+
+If you add or change a **world or vehicle visual**, update [`docs/TRACKER.md`](docs/TRACKER.md) in the **same change**.
+
+For that row, fill Physics / Audio / VFX, or mark `n/a` with a reason.
+
+- **Audio not n/a:** add or update tasks on the Vehicle Audio plan. Sample keys live in [`src/audio/config.ts`](src/audio/config.ts) (`tire.roll.mud`, `tire.roll.water`, `tire.roll.gravel`, `impact.water.*`, `scrape.rock`, forest/wind/river ambience).
+- **Physics not n/a:** do not ship a new mesh without a collider, unless the row says visual-only (pebbles only).
+- Do not mark a world feature complete while its tracker cells are empty.
+
+```markdown
+| mud ruts | terrain.ts splat | surface id 6 | tire.roll.mud | darker dust | n/a | in progress |
+```

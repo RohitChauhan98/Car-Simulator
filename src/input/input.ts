@@ -17,16 +17,25 @@ export class Input {
   steer = 0;      // -1 (right) .. +1 (left)
   handbrake = false;
 
+  /** Accumulated mouse look since last consumeLook(). */
+  lookDx = 0;
+  lookDy = 0;
+  zoomDelta = 0;
+  pointerLocked = false;
+  lookEnabled = false;
+  private rightDrag = false;
+
   private keys = new Set<string>();
   private actions: InputAction[] = [];
   private gamepadIndex: number | null = null;
+  private canvas: HTMLCanvasElement | null = null;
 
   constructor() {
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this.keys.add(e.code);
       this.onKeyDown(e.code);
-      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
+      if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'Digit0', 'Backquote'].includes(e.code)) {
         e.preventDefault();
       }
     });
@@ -34,6 +43,57 @@ export class Input {
     window.addEventListener('blur', () => this.keys.clear());
     window.addEventListener('gamepadconnected', (e) => (this.gamepadIndex = e.gamepad.index));
     window.addEventListener('gamepaddisconnected', () => (this.gamepadIndex = null));
+  }
+
+  /** Pointer-lock look on the game canvas. HUD widgets keep their own pointer events. */
+  bindLook(canvas: HTMLCanvasElement) {
+    this.canvas = canvas;
+    canvas.addEventListener('click', () => {
+      if (!this.lookEnabled) return;
+      if (document.pointerLockElement !== canvas) {
+        canvas.requestPointerLock().catch(() => {});
+      }
+    });
+    document.addEventListener('pointerlockchange', () => {
+      this.pointerLocked = document.pointerLockElement === canvas;
+    });
+    document.addEventListener('mousemove', (e) => {
+      if (!this.lookEnabled) return;
+      if (this.pointerLocked || this.rightDrag) {
+        this.lookDx += e.movementX;
+        this.lookDy += e.movementY;
+      }
+    });
+    canvas.addEventListener('contextmenu', (e) => {
+      if (this.lookEnabled) e.preventDefault();
+    });
+    canvas.addEventListener('mousedown', (e) => {
+      if (!this.lookEnabled) return;
+      if (e.button === 2) this.rightDrag = true;
+    });
+    window.addEventListener('mouseup', (e) => {
+      if (e.button === 2) this.rightDrag = false;
+    });
+    canvas.addEventListener('wheel', (e) => {
+      if (!this.lookEnabled) return;
+      e.preventDefault();
+      this.zoomDelta += e.deltaY;
+    }, { passive: false });
+  }
+
+  setLookEnabled(enabled: boolean) {
+    this.lookEnabled = enabled;
+    if (!enabled && this.canvas && document.pointerLockElement === this.canvas) {
+      document.exitPointerLock();
+    }
+  }
+
+  consumeLook(): { dx: number; dy: number; zoom: number } {
+    const out = { dx: this.lookDx, dy: this.lookDy, zoom: this.zoomDelta };
+    this.lookDx = 0;
+    this.lookDy = 0;
+    this.zoomDelta = 0;
+    return out;
   }
 
   private onKeyDown(code: string) {
