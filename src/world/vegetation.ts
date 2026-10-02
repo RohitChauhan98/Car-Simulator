@@ -18,15 +18,28 @@ export type VegetationSystem = {
   dispose: () => void;
 };
 
-/** Stacked-cone pine, close to the reference evergreen silhouette. */
-function makePineFoliage(layers: number, baseRadius: number): THREE.BufferGeometry {
+/**
+ * Stacked-cone pine with jittered layer radii, offsets and spacing so trees
+ * read as irregular evergreens instead of perfect cone stacks.
+ */
+function makePineFoliage(
+  layers: number,
+  baseRadius: number,
+  seed: { n: number },
+): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
+  let y = 3.1;
   for (let i = 0; i < layers; i++) {
     const t = i / Math.max(1, layers - 1);
-    const r = baseRadius * (1 - t * 0.8);
-    const h = 1.05 + (1 - t) * 0.45;
+    const r = baseRadius * (1 - t * 0.8) * (0.82 + rand(seed) * 0.36);
+    const h = (1.05 + (1 - t) * 0.45) * (0.85 + rand(seed) * 0.3);
     const cone = new THREE.ConeGeometry(Math.max(0.18, r), h, 8);
-    cone.translate(0, 3.2 + i * 0.95, 0);
+    cone.translate(
+      (rand(seed) - 0.5) * 0.5 * baseRadius,
+      y,
+      (rand(seed) - 0.5) * 0.5 * baseRadius,
+    );
+    y += 0.8 + rand(seed) * 0.35;
     parts.push(cone);
   }
   const geo = mergeGeometries(parts);
@@ -53,6 +66,46 @@ function makeFernGeo(): THREE.BufferGeometry {
   return geo;
 }
 
+type WindUniforms = {
+  uTime: { value: number };
+  uCam: { value: THREE.Vector3 };
+};
+
+/**
+ * Vertex wind sway + camera-distance fade for card foliage (instanced quads).
+ * Instances keep fixed world transforms; the shader bends blades by height with
+ * a world-position phase, and shrinks tufts past the fade range so distant
+ * cards never shimmer or cost fill rate.
+ */
+function addWindSway(
+  mat: THREE.MeshStandardMaterial,
+  wind: WindUniforms,
+  opts: { strength: number; bladeHeight: number; fadeNear: number; fadeFar: number; cacheKey: string },
+): void {
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uWindTime = wind.uTime;
+    shader.uniforms.uWindCam = wind.uCam;
+    shader.vertexShader =
+      'uniform float uWindTime;\nuniform vec3 uWindCam;\n' +
+      shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        {
+          vec3 iOrigin = vec3(instanceMatrix[3][0], instanceMatrix[3][1], instanceMatrix[3][2]);
+          float phase = iOrigin.x * 0.35 + iOrigin.z * 0.27;
+          float sway = sin(uWindTime * 1.7 + phase) * 0.6
+                     + sin(uWindTime * 3.1 + iOrigin.x * 0.9 - iOrigin.z * 0.6) * 0.4;
+          float bend = smoothstep(0.0, ${opts.bladeHeight.toFixed(2)}, transformed.y);
+          transformed.x += sway * ${opts.strength.toFixed(3)} * bend;
+          transformed.z += sway * ${(opts.strength * 0.6).toFixed(3)} * bend;
+          float dCam = distance(iOrigin.xz, uWindCam.xz);
+          transformed *= 1.0 - smoothstep(${opts.fadeNear.toFixed(1)}, ${opts.fadeFar.toFixed(1)}, dCam);
+        }`,
+      );
+  };
+  mat.customProgramCacheKey = () => opts.cacheKey;
+}
+
 /**
  * Tall pines hugging the trail so spawn reads as a forest corridor, not a prairie.
  */
@@ -71,10 +124,14 @@ export function createVegetation(
   const dummy = new THREE.Object3D();
   const half = WORLD.size * 0.5;
   const color = new THREE.Color();
+  const wind: WindUniforms = {
+    uTime: { value: 0 },
+    uCam: { value: new THREE.Vector3() },
+  };
 
   const trunkGeo = makePineTrunk();
-  const foliageA = makePineFoliage(7, 1.08);
-  const foliageB = makePineFoliage(6, 0.88);
+  const foliageA = makePineFoliage(7, 1.08, { n: 11 });
+  const foliageB = makePineFoliage(6, 0.88, { n: 23 });
 
   const trunkMat = new THREE.MeshStandardMaterial({
     map: textures.bark,
@@ -83,14 +140,14 @@ export function createVegetation(
     color: 0xc4a070,
   });
   const pineMatA = new THREE.MeshStandardMaterial({
-    color: 0x3d6b32,
-    roughness: 0.78,
+    color: 0x38512c,
+    roughness: 0.82,
     metalness: 0,
     envMapIntensity: 0.35,
   });
   const pineMatB = new THREE.MeshStandardMaterial({
-    color: 0x2f5a28,
-    roughness: 0.8,
+    color: 0x2c4524,
+    roughness: 0.84,
     metalness: 0,
     envMapIntensity: 0.35,
   });
@@ -113,7 +170,11 @@ export function createVegetation(
 
     dummy.position.set(x, y, z);
     dummy.scale.set(s * 0.72, s * 1.12, s * 0.72);
-    dummy.rotation.set(0, rand(seed) * Math.PI * 2, 0);
+    dummy.rotation.set(
+      (rand(seed) - 0.5) * 0.07,
+      rand(seed) * Math.PI * 2,
+      (rand(seed) - 0.5) * 0.07,
+    );
     dummy.updateMatrix();
     trunks.setMatrixAt(treeI, dummy.matrix);
     color.setHSL(0.08, 0.38, 0.38 + rand(seed) * 0.16);
@@ -122,7 +183,7 @@ export function createVegetation(
     const foliage = treeI % 2 === 0 ? canopy0 : canopy1;
     const fi = foliage.count;
     foliage.setMatrixAt(fi, dummy.matrix);
-    color.setHSL(0.27 + rand(seed) * 0.07, 0.52, 0.26 + rand(seed) * 0.14);
+    color.setHSL(0.26 + rand(seed) * 0.06, 0.38, 0.24 + rand(seed) * 0.12);
     foliage.setColorAt(fi, color);
     foliage.count++;
 
@@ -199,8 +260,8 @@ export function createVegetation(
   const bushGeo = new THREE.SphereGeometry(0.55, 6, 5);
   bushGeo.scale(1, 0.72, 1);
   const bushMat = new THREE.MeshStandardMaterial({
-    color: 0x3a6e30,
-    roughness: 0.86,
+    color: 0x36592c,
+    roughness: 0.88,
   });
   const bushes = new THREE.InstancedMesh(bushGeo, bushMat, WORLD.bushCount);
   bushes.castShadow = true;
@@ -218,7 +279,7 @@ export function createVegetation(
     dummy.rotation.set(0, rand(seed) * 6, 0);
     dummy.updateMatrix();
     bushes.setMatrixAt(bi, dummy.matrix);
-    color.setHSL(0.28, 0.5, 0.28 + rand(seed) * 0.12);
+    color.setHSL(0.26, 0.38, 0.26 + rand(seed) * 0.1);
     bushes.setColorAt(bi, color);
     bi++;
   }
@@ -233,7 +294,7 @@ export function createVegetation(
     dummy.rotation.set(0, rand(seed) * 6, 0);
     dummy.updateMatrix();
     bushes.setMatrixAt(bi, dummy.matrix);
-    color.setHSL(0.28, 0.5, 0.28 + rand(seed) * 0.12);
+    color.setHSL(0.26, 0.38, 0.26 + rand(seed) * 0.1);
     bushes.setColorAt(bi, color);
     bi++;
   }
@@ -244,11 +305,18 @@ export function createVegetation(
   const fernGeo = makeFernGeo();
   const fernMat = new THREE.MeshStandardMaterial({
     map: textures.leaf,
-    color: 0x4a7a38,
+    color: 0x40662f,
     side: THREE.DoubleSide,
     roughness: 0.9,
     metalness: 0,
     alphaTest: 0.25,
+  });
+  addWindSway(fernMat, wind, {
+    strength: 0.045,
+    bladeHeight: 0.7,
+    fadeNear: 60,
+    fadeFar: 95,
+    cacheKey: 'wind-fern',
   });
   const ferns = new THREE.InstancedMesh(fernGeo, fernMat, WORLD.fernCount);
   ferns.castShadow = true;
@@ -274,56 +342,71 @@ export function createVegetation(
   grassGeo.translate(0, 0.24, 0);
   const grassMat = new THREE.MeshStandardMaterial({
     map: textures.grassCard,
-    color: 0xb7d070,
+    color: 0x9fb36a,
     side: THREE.DoubleSide,
     roughness: 0.95,
     metalness: 0,
     alphaTest: 0.32,
   });
+  addWindSway(grassMat, wind, {
+    strength: 0.09,
+    bladeHeight: 0.5,
+    fadeNear: 55,
+    fadeFar: 80,
+    cacheKey: 'wind-grass',
+  });
   const grass = new THREE.InstancedMesh(grassGeo, grassMat, WORLD.grassCount);
-  grass.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
   grass.frustumCulled = false;
   group.add(grass);
-  const grassSeed = { n: 77 };
 
-  function scatterGrass(carPos: THREE.Vector3) {
-    const R = WORLD.grassRadius;
-    for (let i = 0; i < WORLD.grassCount; i++) {
-      const ang = rand(grassSeed) * Math.PI * 2;
-      const rad = Math.sqrt(rand(grassSeed)) * R;
-      const x = carPos.x + Math.cos(ang) * rad;
-      const z = carPos.z + Math.sin(ang) * rad;
+  // Fixed world-space scatter, written once: a dense band along the trail
+  // corridor plus a sparse far field. Instances never move after this — only
+  // the wind shader animates them — so grass no longer follows the vehicle.
+  let gi = 0;
+  const nearTarget = (WORLD.grassCount * 0.68) | 0;
+  const perSample = Math.max(1, Math.ceil(nearTarget / samples.length));
+  for (const s of samples) {
+    if (gi >= nearTarget) break;
+    const halfW = s.width * 0.5;
+    for (let k = 0; k < perSample && gi < nearTarget; k++) {
+      const sign = rand(seed) < 0.5 ? -1 : 1;
+      const dist = halfW - 0.4 + rand(seed) * (rand(seed) < 0.7 ? 7 : 22);
+      const along = (rand(seed) - 0.5) * 6;
+      const x = s.position.x + s.normal.x * sign * dist + s.tangent.x * along;
+      const z = s.position.z + s.normal.z * sign * dist + s.tangent.z * along;
+      if (Math.abs(x) > half - 12 || Math.abs(z) > half - 12) continue;
       const infl = trail.influenceAt(x, z);
-      if (infl.kind === 'water' && infl.dist < infl.width * 0.55) {
-        dummy.scale.set(0, 0, 0);
-      } else if (infl.dist < infl.width * 0.32 && rand(grassSeed) > 0.22) {
-        dummy.scale.set(0, 0, 0);
-      } else {
-        dummy.position.set(x, heightAt(x, z), z);
-        const onTrack = infl.dist < infl.width * 0.5;
-        const h = onTrack ? 0.18 + rand(grassSeed) * 0.14 : 0.32 + rand(grassSeed) * 0.28;
-        dummy.scale.set(0.55 + rand(grassSeed) * 0.4, h, 1);
-        dummy.rotation.set(0, ang + (i % 2) * 1.2, (rand(grassSeed) - 0.5) * 0.12);
-      }
+      if (infl.kind === 'water' && infl.dist < infl.width * 0.55) continue;
+      if (infl.dist < infl.width * 0.32 && rand(seed) > 0.22) continue;
+      const onTrack = infl.dist < infl.width * 0.5;
+      const h = onTrack ? 0.18 + rand(seed) * 0.14 : 0.32 + rand(seed) * 0.28;
+      dummy.position.set(x, heightAt(x, z), z);
+      dummy.scale.set(0.55 + rand(seed) * 0.4, h, 1);
+      dummy.rotation.set(0, rand(seed) * Math.PI * 2, (rand(seed) - 0.5) * 0.12);
       dummy.updateMatrix();
-      grass.setMatrixAt(i, dummy.matrix);
+      grass.setMatrixAt(gi++, dummy.matrix);
     }
-    grass.instanceMatrix.needsUpdate = true;
-    grassSeed.n = 77;
   }
-
-  let lastGrassX = 1e9;
-  let lastGrassZ = 1e9;
-  scatterGrass(new THREE.Vector3());
+  let grassGuard = 0;
+  while (gi < WORLD.grassCount && grassGuard++ < WORLD.grassCount * 8) {
+    const x = (rand(seed) - 0.5) * (WORLD.size - 24);
+    const z = (rand(seed) - 0.5) * (WORLD.size - 24);
+    const infl = trail.influenceAt(x, z);
+    if (infl.dist < infl.width * 0.5 + 1.5) continue;
+    if (infl.kind === 'water' && infl.dist < infl.width * 2) continue;
+    dummy.position.set(x, heightAt(x, z), z);
+    dummy.scale.set(0.55 + rand(seed) * 0.45, 0.3 + rand(seed) * 0.3, 1);
+    dummy.rotation.set(0, rand(seed) * Math.PI * 2, (rand(seed) - 0.5) * 0.12);
+    dummy.updateMatrix();
+    grass.setMatrixAt(gi++, dummy.matrix);
+  }
+  grass.count = gi;
 
   return {
     group,
-    update(_dt, carPos) {
-      if (Math.hypot(carPos.x - lastGrassX, carPos.z - lastGrassZ) > 7) {
-        lastGrassX = carPos.x;
-        lastGrassZ = carPos.z;
-        scatterGrass(carPos);
-      }
+    update(dt, carPos) {
+      wind.uTime.value += dt;
+      wind.uCam.value.copy(carPos);
     },
     dispose() {
       group.removeFromParent();
