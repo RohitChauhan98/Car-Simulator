@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import RAPIER, { World as RapierWorld } from '@dimforge/rapier3d-compat';
 import { WORLD } from '../config';
 import { TrailNetwork } from './trail';
-import { createSky, type SkySystem, applyCarEnvironment } from './sky';
+import { createSky, type SkySystem, applyCarEnvironment, HORIZON_COLOR } from './sky';
 import { ParticleSystem, type DustSource } from './particles';
 import { OcclusionHash } from './occlusion';
 import { loadEnvTextures, loadEnvMap, type EnvTextures } from './assets';
@@ -101,7 +101,7 @@ function splatMaterial(textures: EnvTextures): THREE.MeshStandardMaterial {
         vec3 grassTex = texture2D(uGrass, uv * 1.2).rgb;
         vec3 rockC = texture2D(uRock, uv * 0.65).rgb;
         vec3 mudC = texture2D(uMud, uv * 1.05).rgb;
-        vec3 grassC = mix(vec3(0.16, 0.30, 0.08), grassTex, 0.22);
+        vec3 grassC = mix(vec3(0.17, 0.25, 0.11), grassTex, 0.35);
         dirtC = mix(vec3(0.42, 0.34, 0.22), dirtC, 0.55);
         vec3 gravelC = mix(dirtC * vec3(0.92, 0.88, 0.80), rockC, 0.55);
         rockC = mix(vec3(0.55, 0.54, 0.50), rockC, 0.7);
@@ -121,7 +121,7 @@ function splatMaterial(textures: EnvTextures): THREE.MeshStandardMaterial {
       `,
     );
   };
-  mat.customProgramCacheKey = () => 'forest-splat-v6';
+  mat.customProgramCacheKey = () => 'forest-splat-v7';
   return mat;
 }
 
@@ -180,6 +180,17 @@ export function createTerrain(
       }
 
       h = Math.max(h, 5);
+
+      // Rim the playable square with steep mountains so the world never ends
+      // visibly or physically — the trimesh collider below gets these same
+      // heights, so the rim is a natural barrier with no invisible walls.
+      const edgeD = Math.max(Math.abs(x), Math.abs(z)) / half;
+      if (edgeD > 0.84) {
+        const u = (edgeD - 0.84) / 0.16;
+        const s = u * u * (3 - 2 * u);
+        h += s * s * 95;
+      }
+
       heights[idx] = h;
 
       let surf = 4;
@@ -223,6 +234,56 @@ export function createTerrain(
   mesh.receiveShadow = true;
   mesh.castShadow = false;
   scene.add(mesh);
+
+  // --- far terrain skirt (visual only) -------------------------------------
+  // Coarse ring of hills continuing past the playable square so the horizon
+  // always has ground under it. Shares the base fbm + rim lift so it meets the
+  // playable mesh at the boundary (tucked 4 m under to avoid z-fighting), then
+  // settles into distant hills tinted toward the horizon haze. No collider —
+  // the rim bowl keeps the vehicle inside.
+  const SKIRT_SIZE = 2800;
+  const SKIRT_N = 100;
+  const skirtGeo = new THREE.PlaneGeometry(SKIRT_SIZE, SKIRT_SIZE, SKIRT_N, SKIRT_N);
+  skirtGeo.rotateX(-Math.PI / 2);
+  const sPos = skirtGeo.attributes.position as THREE.BufferAttribute;
+  const sColors = new Float32Array(sPos.count * 3);
+  const cLush = new THREE.Color(0x54603a);
+  const cRocky = new THREE.Color(0x6f6a60);
+  const tmpC = new THREE.Color();
+  for (let i = 0; i < sPos.count; i++) {
+    const x = sPos.getX(i);
+    const z = sPos.getZ(i);
+    const edgeD = Math.max(Math.abs(x), Math.abs(z)) / half;
+    let h: number;
+    if (edgeD < 0.96) {
+      h = -80; // hidden far below the playable mesh
+    } else {
+      const n = fbm(x * 0.0038, z * 0.0038, 6);
+      h = 24 + n * 14 + fbm(x * 0.011 + 18, z * 0.011, 4) * 7;
+      const u = Math.min(1, Math.max(0, (edgeD - 0.84) / 0.16));
+      const s = u * u * (3 - 2 * u);
+      h += s * s * 95;
+      const far = Math.min(1, Math.max(0, (edgeD - 1.1) / 1.2));
+      h += (fbm(x * 0.0016 + 40, z * 0.0016, 4) - 0.5) * 90 * far;
+      h -= 4;
+    }
+    sPos.setY(i, h);
+    const rocky = fbm(x * 0.02, z * 0.02, 2);
+    tmpC.copy(cLush).lerp(cRocky, Math.min(1, Math.max(0, (rocky - 0.55) * 2.4)));
+    tmpC.lerp(HORIZON_COLOR, Math.min(1, Math.max(0, (edgeD - 1.3) / 1.6)));
+    sColors[i * 3] = tmpC.r;
+    sColors[i * 3 + 1] = tmpC.g;
+    sColors[i * 3 + 2] = tmpC.b;
+  }
+  skirtGeo.setAttribute('color', new THREE.BufferAttribute(sColors, 3));
+  skirtGeo.computeVertexNormals();
+  const skirtMat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.95,
+    metalness: 0,
+  });
+  const skirt = new THREE.Mesh(skirtGeo, skirtMat);
+  scene.add(skirt);
 
   const verts = new Float32Array(pos.count * 3);
   for (let i = 0; i < pos.count; i++) {
@@ -271,6 +332,9 @@ export function createTerrain(
     dispose: () => {
       geo.dispose();
       mat.dispose();
+      skirtGeo.dispose();
+      skirtMat.dispose();
+      skirt.removeFromParent();
     },
   };
 }

@@ -15,8 +15,10 @@ Living matrix. Any world/vehicle visual change must add or update a row here (se
 | Roadside boulders | `obstacles.ts` large beside trail | Rapier balls sized from instance scale | `scrape.rock`, `impact.rock.*` | n/a | camera occlusion | shipped |
 | Pebbles | instanced scatter | visual-only (too small) | n/a | n/a | n/a | shipped |
 | Fallen logs | `obstacles.ts` cylinders | capsules, material `wood` | `impact.wood.*` | n/a | n/a | shipped |
-| Forest corridor | `vegetation.ts` tall pines on trail edge | near-trail trunk capsules, `wood` | denser wind ambience | n/a | occlusion hash, fog 52/220 | shipped |
-| Undergrowth | bushes + ferns on shoulder | n/a (no colliders) | n/a | n/a | n/a | shipped |
+| Forest corridor | `vegetation.ts` tall pines on trail edge, jittered foliage layers + olive palette | near-trail trunk capsules, `wood` | denser wind ambience | n/a | occlusion hash, fog 70/520 | shipped |
+| Undergrowth | bushes + ferns on shoulder, fern wind sway | n/a (no colliders) | n/a | n/a | n/a | shipped |
+| Grass tuft field + wind | `vegetation.ts` fixed world-space scatter (trail band + far field), `addWindSway` vertex shader, camera distance fade | n/a (visual-only ground cover) | n/a (wind ambience already in `ambience.ts`) | n/a | n/a | shipped |
+| Rim mountains + far skirt + ridges | `terrain.ts` edge-bowl lift + 2800 m visual skirt, `sky.ts` layered ridge rings follow the car, unified `HORIZON_COLOR` (fog 70/520) | rim bowl baked into terrain trimesh — natural barrier, no invisible walls | n/a | n/a | n/a | shipped |
 | Dedicated tires | `src/world/tires.ts` + `carMesh.ts` (FBX wheels hidden) | posed from raycast `WheelVisual` | tire roll/skid (existing) | n/a | n/a | shipped |
 | Body materials | glass / paint / metal / lights split | n/a | n/a | n/a | n/a | shipped |
 | Chase camera | closer chase (`distance` 9.2, `height` 2.55), min pull 4.2 m so trees/rocks do not shove the camera into the cabin | n/a | interior vs exterior (hood) | n/a | n/a | shipped |

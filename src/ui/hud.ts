@@ -1,6 +1,6 @@
 /** SVG tach/speedo, gear, input bars, warning lights, surface, toasts, pause. */
 
-import { ENGINE, BRAKES, SURFACES } from '../config';
+import { ENGINE, BRAKES, SURFACES, INPUT_RATES } from '../config';
 
 const TACH_MAX = 8000;
 const SPEED_MAX_KMH = 200;
@@ -115,15 +115,15 @@ export class Hud {
   private helpVisible = false;
   private onHelpKeyDown: (e: KeyboardEvent) => void;
 
-  /** Left-side clutch pedal slider: 0 = engaged (top), 1 = fully pressed (bottom). */
+  /** Left-edge clutch hold button: 0 = engaged, 1 = fully pressed. */
   private clutchSlider = 0;
   private clutchPointerId: number | null = null;
+  private clutchHeld = false;
   private clutchSpringing = false;
   private clutchSpringFrom = 0;
   private clutchSpringT = 0;
   private readonly clutchSpringDuration = 0.32;
-  private clutchTrack: HTMLElement;
-  private clutchThumb: HTMLElement;
+  private clutchBtn: HTMLButtonElement;
   private clutchFillEl: HTMLElement;
 
   constructor(container: HTMLElement) {
@@ -135,14 +135,10 @@ export class Hud {
 
     this.root.innerHTML = `
       <button type="button" class="help-btn" id="help-btn" aria-label="Controls help" title="Controls (I)">i</button>
-      <div class="clutch-slider" id="clutch-slider" title="Clutch pedal — drag down to press, springs back">
-        <div class="clutch-slider-label">Clutch</div>
-        <div class="clutch-slider-track" id="clutch-track">
-          <div class="clutch-slider-fill" id="clutch-fill"></div>
-          <div class="clutch-slider-thumb" id="clutch-thumb"></div>
-        </div>
-        <div class="clutch-slider-hints"><span>Engaged</span><span>Press</span></div>
-      </div>
+      <button type="button" class="clutch-btn" id="clutch-btn" tabindex="-1" title="Clutch — hold to press, springs back on release">
+        <div class="clutch-btn-fill" id="clutch-fill"></div>
+        <span class="clutch-btn-label">Clutch</span>
+      </button>
       <div class="warnings">
         <div class="warn check-engine" id="warn-check">Check</div>
         <div class="warn handbrake" id="warn-hb">Hold</div>
@@ -187,7 +183,7 @@ export class Hud {
           <p>Press P to resume</p>
           <div class="controls-help">
             <div><b>W/S</b> throttle/brake &nbsp; <b>A/D</b> steer</div>
-            <div><b>Clutch slider</b> (left) or <b>Shift</b> — springs back when released</div>
+            <div><b>Clutch button</b> (left, hold) or <b>Shift</b> — springs back when released</div>
             <div><b>Q/E</b> shift (Q from N = reverse) &nbsp; <b>R</b> reverse &nbsp; <b>1–5</b> gears &nbsp; <b>N</b> neutral</div>
             <div><b>R</b> also starts when the engine is off (hold clutch or N) &nbsp; <b>Space</b> handbrake &nbsp; <b>C</b> camera &nbsp; <b>H</b> bars</div>
           </div>
@@ -199,7 +195,7 @@ export class Hud {
           <h2 id="help-title">Controls</h2>
           <div class="controls-help">
             <div><b>W / S</b> throttle / brake &nbsp; <b>A / D</b> steer</div>
-            <div><b>Clutch slider</b> (left edge) — drag down to press; springs back on release</div>
+            <div><b>Clutch button</b> (left edge) — hold to press; springs back on release</div>
             <div><b>Left Shift</b> clutch (hold, accessibility)</div>
             <div><b>Q / E</b> shift down / up (Q from N selects reverse)</div>
             <div><b>1–5</b> direct gear &nbsp; <b>R</b> reverse (when running) &nbsp; <b>\` or 0</b> reverse &nbsp; <b>N</b> neutral</div>
@@ -211,7 +207,7 @@ export class Hud {
           </div>
           <h3>Driving tips</h3>
           <ul class="help-tips">
-            <li>Use the left clutch slider for progressive bite; Shift is on/off.</li>
+            <li>Hold the left clutch button (or Shift); release gently for a smooth bite.</li>
             <li>Hold clutch, press <b>R</b> for reverse, then W to go backward (S is still brake).</li>
             <li>Release the clutch gently in 1st to pull away without stalling.</li>
             <li>In gear with clutch up, the driveline resists rollback (engine braking).</li>
@@ -241,12 +237,11 @@ export class Hud {
     this.pauseOverlay = this.root.querySelector('#pause-overlay')!;
     this.helpBtn = this.root.querySelector('#help-btn')!;
     this.helpOverlay = this.root.querySelector('#help-overlay')!;
-    this.clutchTrack = this.root.querySelector('#clutch-track')!;
-    this.clutchThumb = this.root.querySelector('#clutch-thumb')!;
     this.clutchFillEl = this.root.querySelector('#clutch-fill')!;
     const helpClose = this.root.querySelector('#help-close')!;
     const helpCard = this.helpOverlay.querySelector('.help-card')!;
-    const clutchRoot = this.root.querySelector('#clutch-slider') as HTMLElement;
+    this.clutchBtn = this.root.querySelector('#clutch-btn') as HTMLButtonElement;
+    const clutchBtn = this.clutchBtn;
 
     this.helpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -277,31 +272,32 @@ export class Hud {
       e.stopPropagation();
       this.clutchSpringing = false;
       this.clutchPointerId = e.pointerId;
-      clutchRoot.setPointerCapture(e.pointerId);
-      this.setClutchFromClientY(e.clientY);
-    };
-    const onClutchPointerMove = (e: PointerEvent) => {
-      if (this.clutchPointerId !== e.pointerId) return;
-      e.preventDefault();
-      this.setClutchFromClientY(e.clientY);
+      this.clutchHeld = true;
+      clutchBtn.setPointerCapture(e.pointerId);
+      clutchBtn.classList.add('active');
     };
     const onClutchPointerUp = (e: PointerEvent) => {
       if (this.clutchPointerId !== e.pointerId) return;
       this.clutchPointerId = null;
+      this.clutchHeld = false;
+      clutchBtn.classList.remove('active');
       try {
-        clutchRoot.releasePointerCapture(e.pointerId);
+        clutchBtn.releasePointerCapture(e.pointerId);
       } catch {
         /* already released */
       }
       this.startClutchSpring();
     };
-    clutchRoot.addEventListener('pointerdown', onClutchPointerDown);
-    clutchRoot.addEventListener('pointermove', onClutchPointerMove);
-    clutchRoot.addEventListener('pointerup', onClutchPointerUp);
-    clutchRoot.addEventListener('pointercancel', onClutchPointerUp);
-    clutchRoot.addEventListener('lostpointercapture', () => {
+    clutchBtn.addEventListener('pointerdown', onClutchPointerDown);
+    clutchBtn.addEventListener('pointerup', onClutchPointerUp);
+    clutchBtn.addEventListener('pointercancel', onClutchPointerUp);
+    // Swallow the synthetic click so a held button never toggles focus/keys.
+    clutchBtn.addEventListener('click', (e) => e.preventDefault());
+    clutchBtn.addEventListener('lostpointercapture', () => {
       if (this.clutchPointerId !== null) {
         this.clutchPointerId = null;
+        this.clutchHeld = false;
+        clutchBtn.classList.remove('active');
         this.startClutchSpring();
       }
     });
@@ -310,21 +306,28 @@ export class Hud {
   }
 
   /**
-   * Current clutch pedal from the left slider (0 = engaged, 1 = pressed).
-   * While dragging this overrides keyboard; otherwise spring-return value is
+   * Current clutch pedal from the left hold button (0 = engaged, 1 = pressed).
+   * While held this overrides keyboard; otherwise the spring-return value is
    * merged with keyboard via Math.max in main.
    */
   getClutchSlider(): number {
     return this.clutchSlider;
   }
 
-  /** True while the user is actively dragging the clutch slider. */
+  /** True while the user is holding the clutch button. */
   isClutchSliderActive(): boolean {
     return this.clutchPointerId !== null;
   }
 
-  /** Advance spring-return animation; call each frame with dt seconds. */
+  /** Advance press ramp / spring-return animation; call each frame with dt seconds. */
   tickClutchSpring(dt: number): void {
+    if (this.clutchHeld) {
+      if (this.clutchSlider < 1) {
+        this.clutchSlider = Math.min(1, this.clutchSlider + INPUT_RATES.clutchAttack * dt);
+        this.syncClutchSliderVisual();
+      }
+      return;
+    }
     if (!this.clutchSpringing) return;
     this.clutchSpringT += dt;
     const u = Math.min(1, this.clutchSpringT / this.clutchSpringDuration);
@@ -350,19 +353,8 @@ export class Hud {
     this.clutchSpringT = 0;
   }
 
-  private setClutchFromClientY(clientY: number): void {
-    const rect = this.clutchTrack.getBoundingClientRect();
-    if (rect.height < 1) return;
-    // Top = engaged (0), bottom = fully pressed (1)
-    const t = (clientY - rect.top) / rect.height;
-    this.clutchSlider = Math.max(0, Math.min(1, t));
-    this.syncClutchSliderVisual();
-  }
-
   private syncClutchSliderVisual(): void {
-    const pct = this.clutchSlider * 100;
-    this.clutchFillEl.style.height = `${pct}%`;
-    this.clutchThumb.style.top = `${pct}%`;
+    this.clutchFillEl.style.height = `${this.clutchSlider * 100}%`;
   }
 
   toggleBars(): void {

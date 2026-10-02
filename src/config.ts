@@ -249,14 +249,13 @@ export const WORLD = {
   treeCount: 2000,
   bushCount: 1100,
   fernCount: 420,
-  grassCount: 2600,
-  grassRadius: 18,
+  grassCount: 24000,
   rockCount: 900,
   colliderRockCount: 900,
   logCount: 22,
   pebbleCount: 220,
-  fogNear: 52,
-  fogFar: 220,
+  fogNear: 70,
+  fogFar: 520,
 };
 
 export const CAMERA = {

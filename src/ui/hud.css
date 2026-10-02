@@ -31,88 +31,55 @@ body,
   user-select: none;
 }
 
-/* —— left-edge clutch spring pedal —— */
+/* —— left-edge clutch hold button —— */
 
-.clutch-slider {
+.clutch-btn {
   pointer-events: auto;
   position: absolute;
   left: 14px;
   top: 50%;
   transform: translateY(-50%);
   z-index: 12;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 12px 10px 12px 10px;
-  width: 52px;
+  width: 64px;
+  height: 96px;
+  padding: 0;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(8, 10, 14, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
+  color: #e8ecf0;
   backdrop-filter: blur(6px);
   box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
-  cursor: ns-resize;
+  cursor: pointer;
+  overflow: hidden;
   touch-action: none;
+  font: inherit;
+  transition: border-color 0.12s, box-shadow 0.12s;
 }
 
-.clutch-slider-label {
-  font-size: 9px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-  opacity: 0.7;
-  writing-mode: horizontal-tb;
+.clutch-btn.active {
+  border-color: rgba(227, 199, 110, 0.75);
+  box-shadow:
+    0 2px 10px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(227, 199, 110, 0.35);
 }
 
-.clutch-slider-track {
-  position: relative;
-  width: 18px;
-  height: min(42vh, 220px);
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
-.clutch-slider-fill {
+.clutch-btn-fill {
   position: absolute;
   left: 0;
   right: 0;
-  top: 0;
+  bottom: 0;
   height: 0%;
-  background: linear-gradient(180deg, rgba(227, 199, 110, 0.35), rgba(227, 199, 110, 0.85));
-  border-radius: 3px;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.clutch-slider-thumb {
-  position: absolute;
-  left: 50%;
-  top: 0%;
-  width: 26px;
-  height: 10px;
-  margin-left: -13px;
-  margin-top: -5px;
-  border-radius: 3px;
-  background: #e3c76e;
-  border: 1px solid rgba(255, 255, 255, 0.35);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.45);
+  background: linear-gradient(0deg, rgba(227, 199, 110, 0.85), rgba(227, 199, 110, 0.3));
   pointer-events: none;
 }
 
-.clutch-slider-hints {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  height: min(42vh, 220px);
-  position: absolute;
-  left: 56px;
-  top: 34px;
-  font-size: 8px;
-  letter-spacing: 0.08em;
+.clutch-btn-label {
+  position: relative;
+  font-size: 10px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  opacity: 0.4;
+  opacity: 0.85;
   pointer-events: none;
-  white-space: nowrap;
 }
 
 /* —— instrument cluster —— */
@@ -729,17 +696,9 @@ body,
     padding: 24px 22px;
   }
 
-  .clutch-slider {
+  .clutch-btn {
     left: 8px;
-    width: 44px;
-    padding: 10px 8px;
-  }
-
-  .clutch-slider-track {
-    height: min(36vh, 160px);
-  }
-
-  .clutch-slider-hints {
-    display: none;
+    width: 52px;
+    height: 78px;
   }
 }
