@@ -1,6 +1,6 @@
 import { AUDIO } from '../config';
 import type { EngineLayerId, SurfaceType } from './types';
-import { ENGINE_LAYERS, SURFACE_TYPES } from './mapping';
+import { clamp01, ENGINE_LAYERS, SURFACE_TYPES } from './mapping';
 import { VEHICLE_AUDIO } from './config';
 
 export type SampleKind =
@@ -166,17 +166,29 @@ function fillResonantNoise(
     s = (s * 16807) % 2147483647;
     return (s - 1) / 2147483646;
   };
-  const f = (2 * Math.PI * freq) / sampleRate;
-  const fb = q;
+  // Two-pole resonator with poles at r*e^(±jw). Pole radius MUST stay < 1:
+  // the previous ad-hoc coefficients (y1*0.92 state with fb=q feedback) put a
+  // pole at |z| ≈ 1.35, so the buffer hit Infinity after ~300 samples and then
+  // NaN — and a NaN sample played through any gain (even 0) latches downstream
+  // IIR filters (interior LPF) to NaN forever, silencing the whole mix.
+  const r = 0.9 + 0.098 * clamp01(q);
+  const w = (2 * Math.PI * freq) / sampleRate;
+  const a1 = 2 * r * Math.cos(w);
+  const a2 = -r * r;
   let y1 = 0;
   let y2 = 0;
+  let peak = 0;
   for (let i = 0; i < data.length; i++) {
     const x = rnd() * 2 - 1;
-    const y = x - y2 * fb + y1 * (2 * Math.cos(f) * (1 - fb * 0.05));
+    const y = x + a1 * y1 + a2 * y2;
     y2 = y1;
-    y1 = y * 0.92;
-    data[i] = y * 0.15;
+    y1 = y;
+    data[i] = y;
+    const a = Math.abs(y);
+    if (a > peak) peak = a;
   }
+  const scale = peak > 1e-6 ? 0.5 / peak : 0;
+  for (let i = 0; i < data.length; i++) data[i] *= scale;
   seamlessLoop(data, 256);
 }
 
@@ -187,7 +199,13 @@ function makeBuffer(
 ): AudioBuffer {
   const frames = Math.max(1, Math.floor(ctx.sampleRate * seconds));
   const buf = ctx.createBuffer(1, frames, ctx.sampleRate);
-  fill(buf.getChannelData(0), ctx.sampleRate);
+  const data = buf.getChannelData(0);
+  fill(data, ctx.sampleRate);
+  // Safety net: a single non-finite sample played through any node (even at
+  // gain 0) poisons downstream IIR filters permanently. Never ship one.
+  for (let i = 0; i < data.length; i++) {
+    if (!Number.isFinite(data[i])) data[i] = 0;
+  }
   return buf;
 }
 
