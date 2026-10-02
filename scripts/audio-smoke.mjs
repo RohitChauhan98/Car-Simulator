@@ -172,4 +172,55 @@ function audibleWheelSlip(opts) {
   );
 }
 
+// Generated-buffer stability (mirrors src/audio/samples.ts fillResonantNoise).
+// Regression guard: the old ad-hoc resonator had a pole at |z| ≈ 1.35 →
+// Infinity → NaN buffer → NaN latches downstream IIR filters → total silence.
+{
+  function fillResonantNoise(n, sampleRate, freq, q, seed) {
+    const data = new Float32Array(n);
+    let s = seed;
+    const rnd = () => {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+    const r = 0.9 + 0.098 * clamp01(q);
+    const w = (2 * Math.PI * freq) / sampleRate;
+    const a1 = 2 * r * Math.cos(w);
+    const a2 = -r * r;
+    let y1 = 0;
+    let y2 = 0;
+    let peak = 0;
+    for (let i = 0; i < n; i++) {
+      const x = rnd() * 2 - 1;
+      const y = x + a1 * y1 + a2 * y2;
+      y2 = y1;
+      y1 = y;
+      data[i] = y;
+      const a = Math.abs(y);
+      if (a > peak) peak = a;
+    }
+    const scale = peak > 1e-6 ? 0.5 / peak : 0;
+    for (let i = 0; i < n; i++) data[i] *= scale;
+    return data;
+  }
+
+  const sr = 48000;
+  const skid = fillResonantNoise(sr * 2, sr, 720, 0.62, 11);
+  let bad = 0;
+  let peak = 0;
+  for (const v of skid) {
+    if (!Number.isFinite(v)) bad++;
+    const a = Math.abs(v);
+    if (a > peak) peak = a;
+  }
+  assert.equal(bad, 0, 'skid squeal buffer must be finite');
+  assert.ok(peak <= 0.5 + 1e-6 && peak > 0.05, `peak normalized (${peak})`);
+
+  // Pole radius must stay strictly inside the unit circle for any q in [0,1]
+  for (const q of [0, 0.25, 0.62, 1]) {
+    const r = 0.9 + 0.098 * clamp01(q);
+    assert.ok(r < 1, `pole radius ${r} < 1 for q=${q}`);
+  }
+}
+
 console.log('AUDIO SMOKE OK');
